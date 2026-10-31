@@ -1,0 +1,87 @@
+# 服务器部署
+
+## 准备服务器
+
+建议使用 Linux、固定公网 IP、至少 2 GiB 内存、Docker Compose v2、Python 3.11+。源码编译建议 4 GiB 内存；离线应用包与目标 CPU 架构必须一致。当前 Docker 构建在本机架构执行，不能直接把 ARM64 包用于 AMD64 服务器。
+
+向服务器供应商确认出站 TCP 25 已放行，并可设置公网 IP 的 PTR。无须向公网开放入站 25；本项目不接收互联网邮件。HTTP 默认只绑定服务器 `127.0.0.1:3000`，通过现有 Nginx / Caddy 提供 HTTPS。可选入站 587 仅用于认证 SMTP 提交。
+
+## 配置与启动
+
+```bash
+python3 scripts/setup.py
+```
+
+编辑生成的 `.env`，至少配置：
+
+| 变量 | 内容 |
+| --- | --- |
+| `APP_ENV` | `production` |
+| `APP_URL` | 管理后台 HTTPS origin，例如 `https://mail-admin.example.com`，不能含路径或查询参数 |
+| `OWNER_EMAIL` | 管理员邮箱，仅首次初始化生效 |
+| `BOOTSTRAP_PASSWORD` | 自动生成的初始管理员密码，仅首次初始化生效 |
+| `MAIL_HOSTNAME` | SMTP EHLO 身份，例如 `mail.example.com` |
+| `PUBLIC_IP` | 实际出站公网 IPv4 或 IPv6 |
+| `DELIVERY_ENABLED` | 初始保持 `false` |
+
+`POSTGRES_PASSWORD` 和 `DKIM_ENCRYPTION_KEY` 已自动生成。加密密钥不可丢失或随意替换，否则现有 DKIM 私钥无法解密。不要公开 `.env`、证书私钥、数据库备份或运行 `docker compose config` 输出完整配置；校验时用 `--quiet`。
+
+源码部署：
+
+```bash
+docker compose config --quiet
+docker compose up -d --build --wait
+```
+
+需要自动更新和回退时，建议首次就使用[受管安装方式](releases.zh-CN.md)，两种部署方式不要混用。
+
+Caddy 配置示例：
+
+```caddyfile
+mail-admin.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+使用其他反向代理时保留正常的 `Origin` 请求头，浏览器必须通过 `APP_URL` 访问。登录限流按 TCP 对端地址计算，代理后的所有登录共享该限额；建议只通过 VPN 或受限网络访问管理后台。
+
+## DNS 与首次投递
+
+1. 为 `MAIL_HOSTNAME` 添加 A 或 AAAA，指向 `PUBLIC_IP`。
+2. 在服务器供应商的控制台把 `PUBLIC_IP` 的 PTR 设置为 `MAIL_HOSTNAME`。PTR 不能通过普通域名 DNS 面板代设。
+3. 登录后台添加发信域名，根据页面记录设置 SPF、DKIM 和 DMARC。长 DKIM TXT 可由 DNS 平台分成多个字符串，但必须仍是同一条记录。
+4. 点击“检查 DNS”，确认五项通过。服务每小时重新检查；超过 24 小时未成功更新验证的域名不可发信。
+5. 确认服务器的实际出口 IP，尤其是多网卡、NAT 和 Docker IPv6 场景。设置 `PUBLIC_IP` 不会自动修改操作系统路由。
+6. 将 `.env` 的 `DELIVERY_ENABLED` 改为 `true`，执行 `docker compose up -d --wait app`。受管安装使用文档中的 `reconfigure` 命令。
+7. 发送到自己控制的测试收件箱，检查邮件原始头中的 SPF、DKIM、DMARC 结果及投递位置，再用于日常邮件。
+
+完成配置后刷新后台，“概览”和“服务设置”会出现“发送测试邮件”。填写已验证域名下的发件地址、自己的测试收件地址，并明确选择邮件语言。弹窗会跟踪队列状态；“对方已接收”仍需结合实际收件箱及原始头确认最终结果。配置缺失、关闭投递或域名验证失效时，此入口自动隐藏。
+
+推荐为发信单独使用子域。当前 SPF 检查不支持与其他服务组合的策略，不能为了通过检查覆盖正在使用的域名策略。DMARC 初始 `p=none` 用于观察，确认所有合法来源后再调整策略。
+
+重试间隔依次为 1 分钟、5 分钟、15 分钟、1 小时、3 小时，之后 6 小时；最多 12 次或达到 48 小时。永久 SMTP 错误直接失败。人工重试只适用于失败记录。
+
+## 可选 SMTP 提交
+
+准备 `certs/fullchain.pem` 和 `certs/privkey.pem`，证书覆盖 `MAIL_HOSTNAME`，文件需可被容器 UID/GID `10001:10001` 读取。私钥不要设为所有人可读，使用专用组及 `0640` 权限。证书更新后重启应用加载证书。
+
+如需公网提交，在 `.env` 加入 `SMTP_HOST_BIND=0.0.0.0`；默认只绑定本机。启动：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.smtp.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.smtp.yml up -d --wait
+```
+
+客户端使用 `MAIL_HOSTNAME:587`、STARTTLS、用户名 `bunmail`，密码为后台创建的有效 API 密钥。证书信任验证必须开启，不提供无认证中继或明文 AUTH。管理页面显示的 SMTP 端口是容器内部监听端口 `2525`，客户端使用映射端口 `SMTP_PORT`（默认 `587`）。
+
+## 密码恢复与数据
+
+修改 `.env` 的 `BOOTSTRAP_PASSWORD` 不会覆盖已有密码。服务器管理员可通过标准输入重置密码并撤销全部浏览器会话：
+
+```bash
+python3 scripts/reset-password.py
+```
+
+脚本隐藏输入，密码不出现在命令参数或日志；API 密钥不受密码重置影响。受管部署加上 `--directory /srv/bunmail`。
+
+数据库位于独立 Docker 卷；日常备份必须同时保存数据库和 `.env` 中的 DKIM 加密密钥。不要用删除卷处理启动问题。服务器迁移需要转移数据卷、配置、证书并重建部署状态；不能把目录改名后直接当成新安装。

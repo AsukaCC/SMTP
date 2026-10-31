@@ -1,0 +1,42 @@
+name: ${COMPOSE_PROJECT_NAME:-bunmail-rs}
+services:
+  app:
+    image: ${BUNMAIL_IMAGE:-bunmail-rs:local}
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://bunmail:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/bunmail
+      HTTP_BIND: 0.0.0.0:3000
+    ports:
+      - '127.0.0.1:${HTTP_PORT:-3000}:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 150s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bunmail
+      POSTGRES_USER: bunmail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U bunmail -d bunmail]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  database:

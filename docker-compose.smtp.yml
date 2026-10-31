@@ -1,0 +1,10 @@
+services:
+  app:
+    environment:
+      SMTP_BIND: 0.0.0.0:2525
+      SMTP_TLS_CERT: /certs/fullchain.pem
+      SMTP_TLS_KEY: /certs/privkey.pem
+    volumes:
+      - ./certs:/certs:ro
+    ports:
+      - '${SMTP_HOST_BIND:-127.0.0.1}:${SMTP_PORT:-587}:2525'
