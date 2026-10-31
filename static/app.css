@@ -97,9 +97,17 @@ td.subject { min-width: 160px; max-width: 330px; overflow-wrap: anywhere; }
 .domain { border-bottom: 1px solid var(--line); padding: 22px 0; }
 .domain:first-child { padding-top: 0; }
 .domain-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+[data-action="verify"] { min-width: 160px; font-variant-numeric: tabular-nums; }
 .checks { display: flex; flex-wrap: wrap; gap: 14px; margin: 18px 0 12px; }
 .check { font-size: 11px; display: flex; align-items: center; gap: 5px; color: var(--muted); }
 .check.ok { color: var(--green); }
+.check.warn { color: #987019; }
+.notice { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; margin-bottom: 20px; padding: 12px 0; border-block: 1px solid var(--line); overflow-wrap: anywhere; }
+.notice.warning { color: #916614; border-color: #e8dab7; }
+.notice svg { margin-top: 1px; }
+.dns-change { padding-block: 16px; border-bottom: 1px solid var(--line); }
+.dns-change code { overflow-wrap: anywhere; min-width: 0; }
+.dns-change .badge { margin-left: auto; }
 .check svg { width: 14px; height: 14px; }
 .dns-table td { vertical-align: top; }
 .dns-table code { overflow-wrap: anywhere; word-break: break-word; min-width: 120px; display: block; max-width: 650px; }
@@ -129,6 +137,10 @@ details summary { cursor: pointer; font-size: 12px; color: var(--green); padding
 .settings-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 36px 48px; padding-top: 8px; }
 .settings-grid h2 { display: flex; align-items: center; gap: 9px; }
 .settings-grid h2 svg { color: #8c9b90; width: 17px; height: 17px; }
+.version-section { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
+.version-actions { margin-top: 18px; }
+.version-section .update-status { font-size: 12px; }
+[data-action="check-updates"] { min-width: 160px; font-variant-numeric: tabular-nums; }
 .readiness { padding: 20px 0 24px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 28px; }
 .readiness .section-head { margin-bottom: 19px; }
 .readiness-steps { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 22px; }

@@ -7,11 +7,13 @@
 - 简体中文默认界面，支持英文切换并记住偏好。
 - 单管理员登录；独立 API 密钥生成、撤销，密钥只允许发信。
 - 发信域名、RSA 2048 DKIM 密钥、SPF / DKIM / DMARC / PTR / A 或 AAAA 检查。
+- rDNS 为可选告警，缺失时仍可发信；支持发件人显示名称，支持 Cloudflare DNS 预览及创建缺失记录。
 - HTTP API 发信、经过 STARTTLS 与认证的 SMTP 提交、纯文本及 HTML 模板。
 - 内置欢迎、验证码、事务通知、投递测试四类模板，各有简体中文和英文版本；支持模板筛选、示例变量、桌面/手机预览。
 - PostgreSQL 持久队列、发送记录、指数式间隔重试、手动重试和取消排队邮件。
 - Rust 直接连接收件方 MX；无需 SES、Resend、Redis 或 Postfix。
 - Docker 部署，以及同目录防重复安装、更新前备份、健康检查失败恢复原版本、手动回退。
+- 后台查看版本、检查本项目 GitHub 正式发布、复制受管更新与回退命令；在服务器执行更新。
 
 服务采用 Axum、Tokio、SQLx 和 PostgreSQL；Lettre 处理 MIME、DKIM 和出站 SMTP，Mailin 处理提交协议状态，Hickory 负责 DNS。前端静态资源编译进同一个 Rust 二进制文件。
 
@@ -30,10 +32,11 @@ docker compose up -d --build --wait
 
 “发送测试邮件”入口只有在配置公网 IP、启用投递、并存在最近 24 小时内通过全部 DNS 检查的发信域名后才显示。可填写发件地址、收件地址及邮件语言，提交后显示实际队列状态和错误；后端仍会校验发件域名。未配置时不会显示测试入口，也不能通过直接请求绕过限制。
 
-生产部署须配置固定公网 IP、出站 TCP 25、域名 DNS、服务器供应商处的 PTR，以及管理页面 HTTPS。**rDNS 是接收方验证服务器身份的一环，并不是发信协议，也不保证进入收件箱。**
+生产部署须配置固定公网 IP、出站 TCP 25、域名 DNS，以及管理页面 HTTPS。建议在服务器供应商处配置 PTR；缺失或不匹配时本应用只提示，不阻止发送，但收件方仍可能拒收或归入垃圾邮件。**rDNS 是接收方验证服务器身份的一环，并不是发信协议，也不保证进入收件箱。**
 
 - [服务器与 Docker 部署](docs/deployment.zh-CN.md)
 - [API 与 SMTP 使用](docs/api.zh-CN.md)
+- [Cloudflare DNS 自动配置](docs/cloudflare.zh-CN.md)
 - [版本打包、更新及回退](docs/releases.zh-CN.md)
 - [维护约定](AGENTS.md)
 

@@ -39,7 +39,10 @@ async fn logo() -> impl IntoResponse {
 async fn security(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-transform"),
+    );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -69,6 +72,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
         .route("/api/v1/config", get(api::config))
+        .route("/api/v1/updates", get(crate::updates::status))
+        .route("/api/v1/updates/check", post(crate::updates::check))
         .route("/api/v1/stats", get(api::stats))
         .route(
             "/api/v1/domains",
@@ -79,6 +84,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::delete_domain),
         )
         .route("/api/v1/domains/{id}/verify", post(api::verify_domain))
+        .route(
+            "/api/v1/domains/{id}/cloudflare/preview",
+            post(crate::cloudflare::preview),
+        )
+        .route(
+            "/api/v1/domains/{id}/cloudflare/apply",
+            post(crate::cloudflare::apply),
+        )
         .route("/api/v1/api-keys", get(api::list_keys).post(api::add_key))
         .route(
             "/api/v1/api-keys/{id}",

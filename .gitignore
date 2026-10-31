@@ -6,6 +6,7 @@
 /.bunmail/
 /releases/
 /artifacts/
+/backups/
 *.pem
 *.key
 *.dump

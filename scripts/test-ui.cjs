@@ -36,7 +36,24 @@ const domain=`ui-${stamp}.test`, template=`UI fixture ${stamp}`, key=`UI fixture
     const domainRow=page.locator('.domain').filter({hasText:domain});
     await domainRow.locator('details summary').click();
     assert((await domainRow.locator('.dns-table').textContent()).includes('v=DKIM1'));
-    await domainRow.locator('[data-action=verify]').click();await idle();
+    const verifyButton=domainRow.locator('[data-action=verify]');
+    const domainId=await verifyButton.getAttribute('data-id');
+    for(let attempt=0;attempt<3;attempt++){
+      const response=page.waitForResponse(response=>response.url().endsWith(`/domains/${domainId}/verify`)&&response.request().method()==='POST');
+      await verifyButton.click();
+      assert.equal((await response).status(),200);
+      if(attempt<2)await page.waitForFunction(id=>{const button=document.querySelector(`[data-action="verify"][data-id="${id}"]`);return button&&!button.disabled;},domainId);
+    }
+    await page.waitForFunction(id=>document.querySelector(`[data-action="verify"][data-id="${id}"]`)?.textContent.includes('秒后'),domainId);
+    assert(await verifyButton.isDisabled());
+    await page.reload();await page.locator('nav').waitFor();await idle();
+    assert(await verifyButton.isDisabled());
+    await page.locator('[data-locale=en]').click();await idle();
+    assert.match(await verifyButton.textContent(),/Check again in \d+s/);
+    await page.setViewportSize({width:390,height:844});await fit();
+    await page.screenshot({path:'artifacts/domains-en-mobile.png'});
+    await page.setViewportSize({width:1440,height:1000});
+    await page.locator('[data-locale=zh-CN]').click();await idle();
     await page.screenshot({path:'artifacts/domains-zh-desktop.png'});
     await nav('templates');
     await page.locator('[data-action=initialize-templates]').click();
@@ -63,10 +80,12 @@ const domain=`ui-${stamp}.test`, template=`UI fixture ${stamp}`, key=`UI fixture
     await page.waitForFunction(()=>!document.querySelector('#dialog').open);await idle();
     await nav('send');
     await page.locator('#from').fill('hello@example.com');
+    await page.locator('#from_name').fill('中文发件人');
     await page.locator('#template_id').selectOption({label:template});
     await page.locator('#variables').fill('{"name":"中文变量"}');
     await page.locator('[data-locale=en]').click();await idle();
     assert.equal(await page.locator('#from').inputValue(),'hello@example.com');
+    assert.equal(await page.locator('#from_name').inputValue(),'中文发件人');
     assert.equal(await page.locator('#variables').inputValue(),'{"name":"中文变量"}');
     assert(await page.locator('#manual-body').isHidden());
     assert(await page.locator('#send-form button[type=submit]').isDisabled());
@@ -82,6 +101,42 @@ const domain=`ui-${stamp}.test`, template=`UI fixture ${stamp}`, key=`UI fixture
     await page.locator('#dialog [data-action=close]').click();
     await page.locator('tr').filter({hasText:key}).locator('[data-action=revoke-key]').click();
     await page.locator('tr').filter({hasText:key}).getByText('Revoked',{exact:true}).waitFor();
+    await nav('settings');
+    await page.locator('[data-action=check-updates]').waitFor();
+    await page.locator('[data-action=update-commands]').click();
+    await page.locator('#install-directory').fill("/srv/mail's instance");
+    assert((await page.locator('#update-command').textContent()).includes("'/srv/mail'\\''s instance'"));
+    await page.locator('#package-directory').fill('relative-directory');
+    assert(await page.locator('[data-action=copy-update-command]').isDisabled());
+    await page.locator('#package-directory').fill('/tmp/bunmail-packages/0.1.1');
+    assert(!(await page.locator('[data-action=copy-update-command]').isDisabled()));
+    await page.locator('#install-directory').fill('');
+    assert(await page.locator('[data-action=copy-update-command]').isDisabled());
+    await page.locator('#dialog [data-action=close]').click();
+    // Fixture responses exercise update states independently of GitHub availability.
+    let updateFixture={current_version:'0.1.0',repository:'AsukaCC/SMTP',releases_url:'https://github.com/AsukaCC/SMTP/releases',status:'not_checked',check:null,retry_after_seconds:0};
+    await page.route('**/api/v1/updates',route=>route.fulfill({json:updateFixture}));
+    await page.route('**/api/v1/updates/check',route=>{updateFixture={...updateFixture,status:'update_available',check:{latest_version:'0.1.1',checked_at:new Date().toISOString(),release_url:'https://github.com/AsukaCC/SMTP/releases/tag/v0.1.1'},retry_after_seconds:60};return route.fulfill({json:updateFixture});});
+    await page.reload();await page.locator('nav').waitFor();await idle();
+    await page.locator('[data-action=check-updates]').click();
+    await page.locator('.update-status').filter({hasText:'Update available'}).waitFor();
+    assert(await page.locator('[data-action=check-updates]').isDisabled());
+    await page.reload();await page.locator('nav').waitFor();await idle();
+    assert(await page.locator('[data-action=check-updates]').isDisabled());
+    await page.screenshot({path:'artifacts/updates-en-desktop.png'});
+    await page.locator('[data-locale=zh-CN]').click();await idle();
+    assert.equal(await page.locator('.update-status').textContent(),'有新版本');
+    await page.setViewportSize({width:390,height:844});await fit();
+    await page.locator('.version-section').scrollIntoViewIfNeeded();
+    await page.screenshot({path:'artifacts/updates-zh-mobile.png'});
+    await page.locator('[data-action=update-commands]').click();await fit();
+    await page.screenshot({path:'artifacts/update-commands-zh-mobile.png'});
+    await page.locator('#dialog [data-action=close]').click();
+    updateFixture={...updateFixture,status:'check_failed',check:null,retry_after_seconds:0};
+    await page.reload();await page.locator('nav').waitFor({state:'attached'});await idle();
+    assert((await page.locator('.update-status').textContent()).includes('检查失败'));
+    await page.unroute('**/api/v1/updates');await page.unroute('**/api/v1/updates/check');
+    await page.setViewportSize({width:1440,height:1000});
     for(const locale of ['en','zh-CN']) {
       await page.locator(`[data-locale="${locale}"]`).click();await idle();
       for(const section of ['dashboard','send','emails','domains','templates','keys','settings']){

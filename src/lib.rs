@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod cloudflare;
 pub mod config;
 pub mod crypto;
 pub mod dns;
@@ -11,4 +12,5 @@ pub mod queue;
 pub mod send;
 pub mod smtp;
 pub mod state;
+pub mod updates;
 pub mod web;

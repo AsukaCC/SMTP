@@ -8,6 +8,8 @@ use crate::{
 use axum::{
     Json,
     extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,8 +30,9 @@ pub async fn config(auth: Auth, State(state): State<AppState>) -> Result<Json<Va
     let ready_to_test = state.config.delivery_enabled
         && state.config.public_ip.is_some()
         && !verified_domains.is_empty();
+    let rdns_warning: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM domains WHERE checked_at IS NOT NULL AND COALESCE(checks->>'ptr','false') <> 'true')").fetch_one(&state.db).await?;
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"mail_hostname":state.config.mail_hostname,"public_ip":state.config.public_ip,"delivery_enabled":state.config.delivery_enabled,"smtp_enabled":state.config.smtp_bind.is_some(),"smtp_tls":state.config.smtp_cert.is_some(),"smtp_port":state.config.smtp_bind.map(|a|a.port()),"verified_domains":verified_domains,"ready_to_test":ready_to_test}),
+        json!({"version":env!("CARGO_PKG_VERSION"),"mail_hostname":state.config.mail_hostname,"public_ip":state.config.public_ip,"delivery_enabled":state.config.delivery_enabled,"smtp_enabled":state.config.smtp_bind.is_some(),"smtp_tls":state.config.smtp_cert.is_some(),"smtp_port":state.config.smtp_bind.map(|a|a.port()),"verified_domains":verified_domains,"ready_to_test":ready_to_test,"rdns_warning":rdns_warning,"cloudflare_configured":state.config.cloudflare_api_token.is_some()}),
     ))
 }
 
@@ -47,7 +50,7 @@ pub async fn list_domains(auth: Auth, State(state): State<AppState>) -> Result<J
         .fetch_all(&state.db)
         .await?;
     Ok(Json(
-        json!({"data":rows.iter().map(|d|json!({"domain":d,"records":dns::records(&state,d)})).collect::<Vec<_>>()}),
+        json!({"data":rows.iter().map(|d|json!({"domain":d,"records":dns::records(&state,d),"retry_after_seconds":state.retry_after_seconds(&format!("verify:{}",d.id),3)})).collect::<Vec<_>>()}),
     ))
 }
 
@@ -104,26 +107,46 @@ pub async fn verify_domain(
     auth: Auth,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     auth.require_admin()?;
-    if !state.rate_limit(format!("verify:{id}"), 3, 60) {
-        return Err(AppError::conflict("Please wait before checking DNS again"));
-    }
     let domain = sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE id=$1")
         .bind(id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(AppError::not_found)?;
-    let checks = dns::verify(&state, &domain).await.map_err(|_| {
-        AppError::invalid("DNS lookup failed. Try again later; saved verification was not changed")
-    })?;
+    let limit = state.check_rate_limit(format!("verify:{id}"), 3, 60);
+    if !limit.allowed {
+        return Ok((StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER,limit.retry_after_seconds.to_string())],
+            Json(json!({"error":{"code":"RATE_LIMITED","message":"Please wait before checking DNS again","retry_after_seconds":limit.retry_after_seconds}}))).into_response());
+    }
+    let checks = match dns::verify(&state, &domain).await {
+        Ok(checks) => checks,
+        Err(_) => {
+            let retry_after_seconds = state.retry_after_seconds(&format!("verify:{id}"), 3);
+            let mut response = AppError::invalid(
+                "DNS lookup failed. Try again later; saved verification was not changed",
+            )
+            .into_response();
+            if retry_after_seconds > 0 {
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    retry_after_seconds
+                        .to_string()
+                        .parse()
+                        .map_err(|_| AppError::internal())?,
+                );
+            }
+            return Ok(response);
+        }
+    };
     sqlx::query("UPDATE domains SET checks=$1,verified=$2,checked_at=now() WHERE id=$3")
         .bind(json!(checks))
         .bind(checks.verified())
         .bind(id)
         .execute(&state.db)
         .await?;
-    Ok(Json(json!({"verified":checks.verified(),"checks":checks})))
+    Ok(Json(json!({"verified":checks.verified(),"checks":checks,"retry_after_seconds":state.retry_after_seconds(&format!("verify:{id}"),3)})).into_response())
 }
 
 pub async fn delete_domain(

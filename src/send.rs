@@ -11,7 +11,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use lettre::Address;
+use lettre::{Address, message::Mailbox};
 use minijinja::{AutoEscape, Environment, UndefinedBehavior};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -20,6 +20,8 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub struct TestRequest {
     from: String,
+    #[serde(default)]
+    from_name: String,
     to: String,
     language: String,
 }
@@ -61,6 +63,7 @@ pub async fn test_send(
     };
     let mut message = SendRequest {
         from: input.from,
+        from_name: input.from_name,
         to: input.to,
         variables,
         ..Default::default()
@@ -81,6 +84,18 @@ pub fn validate_address(address: &str) -> Result<Address> {
         return Err(AppError::invalid("Email address must use a DNS domain"));
     }
     Ok(parsed)
+}
+
+pub fn sender(address: &str, name: &str) -> Result<Mailbox> {
+    if name.len() > 256 || name.chars().any(char::is_control) {
+        return Err(AppError::invalid(
+            "Sender name must be at most 256 bytes without control characters",
+        ));
+    }
+    Ok(Mailbox::new(
+        (!name.trim().is_empty()).then(|| name.trim().to_owned()),
+        validate_address(address)?,
+    ))
 }
 
 fn render(source: &str, variables: &serde_json::Map<String, Value>, html: bool) -> Result<String> {
@@ -134,6 +149,7 @@ pub async fn enqueue(
     idempotency: Option<String>,
 ) -> Result<(Uuid, bool)> {
     let from = validate_address(&input.from)?;
+    let mailbox = sender(&input.from, &input.from_name)?;
     validate_address(&input.to)?;
     if let Some(ref key) = idempotency
         && (key.is_empty()
@@ -203,7 +219,7 @@ pub async fn enqueue(
     let id = Uuid::new_v4();
     let message_id = format!("{id}@{}", state.config.mail_hostname);
     let inserted = sqlx::query("INSERT INTO emails (id,api_key_id,domain_id,from_address,to_address,subject,html,text,message_id,idempotency_scope,idempotency_key,request_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (idempotency_scope,idempotency_key) DO NOTHING")
-        .bind(id).bind(auth.api_key_id).bind(domain.id).bind(&input.from).bind(&input.to).bind(&input.subject).bind(&input.html).bind(&input.text).bind(message_id).bind(&scope).bind(&idempotency).bind(&request_hash).execute(&state.db).await?;
+        .bind(id).bind(auth.api_key_id).bind(domain.id).bind(mailbox.to_string()).bind(&input.to).bind(&input.subject).bind(&input.html).bind(&input.text).bind(message_id).bind(&scope).bind(&idempotency).bind(&request_hash).execute(&state.db).await?;
     if inserted.rows_affected() == 0 {
         let (id, hash): (Uuid, String) = sqlx::query_as(
             "SELECT id,request_hash FROM emails WHERE idempotency_scope=$1 AND idempotency_key=$2",
@@ -249,6 +265,12 @@ mod tests {
     use super::*;
     #[test]
     fn rejects_header_injection() {
+        assert!(sender("a@example.com", "name\r\nBcc: x@test.com").is_err());
+        assert!(sender("a@example.com", "name\0").is_err());
+        let mailbox = sender("a@example.com", "中文发件人, \"团队\"").unwrap();
+        let parsed: Mailbox = mailbox.to_string().parse().unwrap();
+        assert_eq!(parsed.name, mailbox.name);
+        assert_eq!(parsed.email.to_string(), "a@example.com");
         assert!(validate_address("a@test.com\r\nBcc: x@test.com").is_err());
         assert!(validate_address("a@localhost").is_err());
         assert!(validate_address("a@example.com").is_ok());

@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     let mut state = AppState {
+        cloudflare_lock: Default::default(),
+        updates: Default::default(),
         db: pool,
         config: Arc::new(config.clone()),
         dns: TokioAsyncResolver::tokio_from_system_conf()?,

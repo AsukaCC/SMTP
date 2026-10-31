@@ -54,6 +54,8 @@ pub struct Email {
 #[serde(deny_unknown_fields)]
 pub struct SendRequest {
     pub from: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_name: String,
     pub to: String,
     #[serde(default)]
     pub subject: String,

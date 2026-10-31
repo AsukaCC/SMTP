@@ -80,6 +80,8 @@ async fn authenticated_api_queue_and_dkim() {
         .unwrap();
     sqlx::migrate!("./migrations").run(&db).await.unwrap();
     let state = AppState {
+        cloudflare_lock: Default::default(),
+        updates: Default::default(),
         db: db.clone(),
         config: Arc::new(Config {
             database_url: db_url.to_string(),
@@ -95,6 +97,8 @@ async fn authenticated_api_queue_and_dkim() {
             smtp_cert: None,
             smtp_key: None,
             development: true,
+            update_repository: None,
+            cloudflare_api_token: None,
         }),
         dns: TokioAsyncResolver::tokio_from_system_conf().unwrap(),
         limits: Arc::new(Mutex::new(HashMap::new())),
@@ -149,6 +153,7 @@ async fn authenticated_api_queue_and_dkim() {
         .fetch_one(&db)
         .await
         .unwrap();
+    verify_dns_cooldown(&state, &cookie, id).await;
     assert!(!stored.private_key.contains("PRIVATE KEY"));
     assert!(
         crypto::decrypt(&[42; 32], "example.test", &stored.private_key)
@@ -166,6 +171,35 @@ async fn authenticated_api_queue_and_dkim() {
     .await;
     let token = key["token"].as_str().unwrap();
     let bearer = format!("Bearer {token}");
+    verify_update_access(&state, &cookie, &bearer).await;
+    for action in ["preview", "apply"] {
+        let path = format!("/api/v1/domains/{id}/cloudflare/{action}");
+        let body = json!({"fingerprint":"test"});
+        assert_eq!(
+            request(&app, "POST", &path, body.clone(), None, true)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&app, "POST", &path, body.clone(), Some(&bearer), true)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            request(&app, "POST", &path, body.clone(), Some(&cookie), false)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, _, error) = request(&app, "POST", &path, body, Some(&cookie), true).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            error["error"]["message"],
+            "Configure CLOUDFLARE_API_TOKEN on the server first"
+        );
+    }
     assert_eq!(
         request(
             &app,
@@ -191,6 +225,7 @@ async fn authenticated_api_queue_and_dkim() {
     assert!(!keys.to_string().contains(token));
     let send_input = SendRequest {
         from: "hello@example.test".into(),
+        from_name: "中文发件人, 团队".into(),
         to: "recipient@example.net".into(),
         subject: "中文标题".into(),
         html: "<p>你好</p>".into(),
@@ -206,12 +241,19 @@ async fn authenticated_api_queue_and_dkim() {
             .await
             .is_err()
     );
-    // Fixture bypasses DNS only inside this isolated database. No delivery worker is started.
-    sqlx::query("UPDATE domains SET verified=TRUE,checked_at=now() WHERE id=$1")
-        .bind(id)
-        .execute(&db)
-        .await
-        .unwrap();
+    verify_without_ptr(&state, &cookie, &stored).await;
+    let (_, _, configuration) = request(
+        &app,
+        "GET",
+        "/api/v1/config",
+        json!({}),
+        Some(&cookie),
+        false,
+    )
+    .await;
+    assert_eq!(configuration["ready_to_test"], true);
+    assert_eq!(configuration["rdns_warning"], true);
+    assert_eq!(configuration["cloudflare_configured"], false);
     let (first, second) = tokio::join!(
         send::enqueue(
             &state,
@@ -248,6 +290,17 @@ async fn authenticated_api_queue_and_dkim() {
         .unwrap();
     let signed = queue::build_message(&email, &domain, &[42; 32]).unwrap();
     let raw = String::from_utf8(signed.formatted()).unwrap();
+    let parsed = mail_parser::MessageParser::default()
+        .parse(raw.as_bytes())
+        .unwrap();
+    assert_eq!(
+        parsed.from().unwrap().first().unwrap().name.as_deref(),
+        Some("中文发件人, 团队")
+    );
+    assert_eq!(
+        signed.envelope().from().unwrap().to_string(),
+        "hello@example.test"
+    );
     assert!(raw.contains("DKIM-Signature:"));
     assert!(raw.contains("d=example.test"));
     assert!(raw.contains("s=bunmail"));
@@ -388,7 +441,10 @@ async fn authenticated_api_queue_and_dkim() {
         },
     };
     let message = Message::builder()
-        .from("hello@example.test".parse().unwrap())
+        .from(lettre::message::Mailbox::new(
+            Some("SMTP 中文发件人".into()),
+            "hello@example.test".parse().unwrap(),
+        ))
         .to("recipient@example.net".parse().unwrap())
         .subject("SMTP fixture")
         .body("Local submission fixture".to_string())
@@ -415,6 +471,13 @@ async fn authenticated_api_queue_and_dkim() {
     .await
     .unwrap();
     assert_eq!(count, 1);
+    let smtp_from: String =
+        sqlx::query_scalar("SELECT from_address FROM emails WHERE subject='SMTP fixture'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let smtp_from: lettre::message::Mailbox = smtp_from.parse().unwrap();
+    assert_eq!(smtp_from.name.as_deref(), Some("SMTP 中文发件人"));
     stop.send(true).unwrap();
     smtp_task.await.unwrap();
     verify_templates_preview_and_test_send(&app, &state, &cookie, &bearer).await;
@@ -511,6 +574,264 @@ async fn authenticated_api_queue_and_dkim() {
         .await
         .unwrap();
     admin.close().await;
+}
+
+async fn verify_without_ptr(state: &AppState, cookie: &str, domain: &Domain) {
+    use hickory_resolver::{
+        config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
+        proto::{
+            op::{Message, MessageType, ResponseCode},
+            rr::{
+                RData, Record, RecordType,
+                rdata::{A, TXT},
+            },
+        },
+    };
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let records = bunmail_rs::dns::records(state, domain);
+    let server = tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        loop {
+            let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+            let query = Message::from_vec(&buffer[..size]).unwrap();
+            let mut response = Message::new();
+            response
+                .set_id(query.id())
+                .set_message_type(MessageType::Response)
+                .set_recursion_available(true)
+                .add_queries(query.queries().to_vec());
+            for question in query.queries() {
+                let name = question.name().to_utf8();
+                for record in &records {
+                    if record.name != name.trim_end_matches('.') {
+                        continue;
+                    }
+                    let data = match (question.query_type(), record.kind) {
+                        (RecordType::TXT, "TXT") => Some(RData::TXT(TXT::new(
+                            record
+                                .value
+                                .as_bytes()
+                                .chunks(200)
+                                .map(|part| String::from_utf8(part.to_vec()).unwrap())
+                                .collect(),
+                        ))),
+                        (RecordType::A, "A") => Some(RData::A(A(record.value.parse().unwrap()))),
+                        _ => None,
+                    };
+                    if let Some(data) = data {
+                        response.add_answer(Record::from_rdata(question.name().clone(), 60, data));
+                    }
+                }
+            }
+            if response.answers().is_empty() {
+                response.set_response_code(ResponseCode::NXDomain);
+            }
+            socket
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
+    let mut fixture = state.clone();
+    fixture.dns = TokioAsyncResolver::tokio(
+        ResolverConfig::from_parts(
+            None,
+            vec![],
+            NameServerConfigGroup::from_ips_clear(&["127.0.0.1".parse().unwrap()], port, true),
+        ),
+        ResolverOpts::default(),
+    );
+    let (status, _, result) = request(
+        &web::router(fixture),
+        "POST",
+        &format!("/api/v1/domains/{}/verify", domain.id),
+        json!({}),
+        Some(cookie),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["checks"]["ptr"], false);
+    assert_eq!(result["checks"]["forward"], true);
+    server.abort();
+    let _ = server.await;
+}
+
+async fn verify_update_access(state: &AppState, cookie: &str, bearer: &str) {
+    let app = web::router(state.clone());
+    for (method, path) in [
+        ("GET", "/api/v1/updates"),
+        ("POST", "/api/v1/updates/check"),
+    ] {
+        assert_eq!(
+            request(&app, method, path, json!({}), None, true).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&app, method, path, json!({}), Some(bearer), true)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, _, data) = request(&app, method, path, json!({}), Some(cookie), true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["status"], "disabled");
+    }
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/updates/check",
+            json!({}),
+            Some(cookie),
+            false
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut fixture = state.clone();
+    let mut config = (*state.config).clone();
+    config.update_repository = Some("AsukaCC/SMTP".into());
+    fixture.config = Arc::new(config);
+    fixture.updates = Default::default();
+    let app = web::router(fixture.clone());
+    let (_, _, data) = request(
+        &app,
+        "GET",
+        "/api/v1/updates",
+        json!({}),
+        Some(cookie),
+        false,
+    )
+    .await;
+    assert_eq!(data["status"], "not_checked");
+    for status in ["update_available", "check_failed"] {
+        *fixture.updates.lock().await = Some(bunmail_rs::updates::Check {
+            status: status.into(),
+            checked_at: chrono::Utc::now(),
+            latest_version: None,
+            release_url: None,
+        });
+        let (_, _, first) = request(
+            &app,
+            "GET",
+            "/api/v1/updates",
+            json!({}),
+            Some(cookie),
+            false,
+        )
+        .await;
+        let (_, _, cached) = request(
+            &app,
+            "POST",
+            "/api/v1/updates/check",
+            json!({}),
+            Some(cookie),
+            true,
+        )
+        .await;
+        assert_eq!(cached["status"], status);
+        assert_eq!(first["check"], cached["check"]);
+        assert!(cached["retry_after_seconds"].as_i64().unwrap() > 0);
+    }
+}
+
+async fn verify_dns_cooldown(state: &AppState, cookie: &str, id: Uuid) {
+    use hickory_resolver::{
+        config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
+        proto::op::{Message, MessageType, ResponseCode},
+    };
+    // A local DNS fixture returns NXDOMAIN, making unsuccessful verification deterministic without public DNS.
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        loop {
+            let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+            let query = Message::from_vec(&buffer[..size]).unwrap();
+            let mut response = Message::new();
+            response
+                .set_id(query.id())
+                .set_message_type(MessageType::Response)
+                .set_recursion_desired(true)
+                .set_recursion_available(true)
+                .set_response_code(ResponseCode::NXDomain)
+                .add_queries(query.queries().to_vec());
+            socket
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
+    let mut fixture = state.clone();
+    fixture.dns = TokioAsyncResolver::tokio(
+        ResolverConfig::from_parts(
+            None,
+            vec![],
+            NameServerConfigGroup::from_ips_clear(&["127.0.0.1".parse().unwrap()], port, true),
+        ),
+        ResolverOpts::default(),
+    );
+    let app = web::router(fixture);
+    let key = format!("verify:{id}");
+    let path = format!("/api/v1/domains/{id}/verify");
+    for index in 1..=3 {
+        let (status, _, data) = request(&app, "POST", &path, json!({}), Some(cookie), true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["verified"], false);
+        let retry = data["retry_after_seconds"].as_u64().unwrap();
+        assert_eq!(retry > 0, index == 3);
+    }
+    let expires = state.limits.lock().unwrap()[&key].1;
+    let (status, headers, data) = request(&app, "POST", &path, json!({}), Some(cookie), true).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(data["error"]["code"], "RATE_LIMITED");
+    let retry = headers["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!((1..=60).contains(&retry));
+    assert_eq!(data["error"]["retry_after_seconds"], retry);
+    assert_eq!(state.limits.lock().unwrap()[&key].1, expires);
+    let (_, _, list) = request(
+        &app,
+        "GET",
+        "/api/v1/domains",
+        json!({}),
+        Some(cookie),
+        false,
+    )
+    .await;
+    assert!(list["data"][0]["retry_after_seconds"].as_u64().unwrap() > 0);
+    state.limits.lock().unwrap().get_mut(&key).unwrap().1 =
+        std::time::Instant::now() - std::time::Duration::from_secs(1);
+    assert_eq!(
+        request(&app, "POST", &path, json!({}), Some(cookie), true)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    state.limits.lock().unwrap().remove(&key);
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()["cache-control"],
+        "no-store, no-transform"
+    );
+    assert!(
+        response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("script-src 'self';")
+    );
+    server.abort();
+    let _ = server.await;
 }
 
 async fn verify_templates_preview_and_test_send(

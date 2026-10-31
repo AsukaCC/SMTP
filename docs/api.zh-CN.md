@@ -12,6 +12,7 @@ Idempotency-Key: order-20261031-001
 
 {
   "from": "hello@example.com",
+  "from_name": "通知中心",
   "to": "recipient@example.net",
   "subject": "测试邮件",
   "html": "<p>你好</p>",
@@ -21,7 +22,9 @@ Idempotency-Key: order-20261031-001
 
 首次成功入队返回 HTTP `202`：`{"id":"UUID","created":true}`。相同 API 密钥、相同幂等键和相同请求重试返回同一 ID、HTTP `200`、`created:false`。同键不同内容返回 `409`。更换 API 密钥即改变幂等范围。
 
-只接受一个裸邮箱地址，不支持显示名称、地址数组或 SMTPUTF8；国际化域名需先转换成 punycode。主题最长 998 字节，正文最多 512 KiB。至少提供 `html` 或 `text` 之一。发件域名必须已验证且发送开关启用。每个 API 密钥每分钟最多 60 次新发送尝试。
+`from` 和 `to` 各接受一个裸邮箱地址，不支持地址数组或 SMTPUTF8；国际化域名需先转换成 punycode。可选 `from_name` 为发件人显示名称，支持中文，最多 256 字节，不能包含控制字符；省略或空值表示只显示地址。邮件头编码和转义由 Lettre 处理，SMTP 信封仍使用裸地址。发送记录中的 `from_address` 保存完整 From 邮箱表示（有名称时为 `名称 <邮箱>`）；旧记录兼容，无须增加数据库字段。未传名称时保持原有幂等请求摘要格式。
+
+主题最长 998 字节，正文最多 512 KiB。至少提供 `html` 或 `text` 之一。发件域名的 SPF、DKIM、DMARC、A/AAAA 必须已验证且发送开关启用。PTR/rDNS 为告警项，不阻止发送；`GET /config` 的 `rdns_warning` 提示最近保存的检查中存在 PTR 未通过的情况。每个 API 密钥每分钟最多 60 次新发送尝试。
 
 ## 模板
 
@@ -52,7 +55,7 @@ Content-Type: application/json
 Origin: https://mail-admin.example.com
 Idempotency-Key: delivery-test-001
 
-{"from":"test@example.com","to":"your-mailbox@example.net","language":"zh-CN"}
+{"from":"test@example.com","from_name":"测试发件人","to":"your-mailbox@example.net","language":"zh-CN"}
 ```
 
 `language` 为 `zh-CN` 或 `en`，独立于后台语言。测试邮件使用内置投递测试正文，经相同的域名验证、限流、幂等和 DKIM 队列投递流程；返回格式与发信 API 相同。未配置时返回 `409`，发件域名未验证或验证过期时返回 `422`，API 密钥访问此管理端点返回 `403`。
@@ -67,6 +70,8 @@ Idempotency-Key: delivery-test-001
 | `/me`、`/config`、`/stats` | GET 当前账号、配置、统计 |
 | `/domains` | GET 列表、POST 添加 `{name}` |
 | `/domains/{id}/verify` | POST 验证 DNS |
+| `/domains/{id}/cloudflare/preview` | POST 预览 Cloudflare DNS 变更，无外部写入 |
+| `/domains/{id}/cloudflare/apply` | POST `{fingerprint}`，核对预览后创建缺失记录 |
 | `/domains/{id}` | DELETE 删除无邮件引用的域名 |
 | `/templates` | GET 列表（含 UUID）、POST 新建 |
 | `/templates/{id}` | PUT 更新、DELETE 删除 |
@@ -79,4 +84,6 @@ Idempotency-Key: delivery-test-001
 
 `GET /health` 无需登录，仅返回服务版本及数据库健康状态。常规错误格式为 `{"error":{"code":"…","message":"…"}}`，框架级 JSON 或路径解析错误可能为文本。
 
-SMTP 提交共用相同校验与队列，必须 STARTTLS 后认证。`From` 头必须与 `MAIL FROM` 一致；一次只能接受一个 `RCPT TO`。SMTP `250 Queued as …` 表示已持久化入队，不表示最终送达。SMTP 本身不支持此 HTTP API 的幂等键。
+Cloudflare 凭据仅配置在服务器 `.env`，不会由 API 返回。`GET /config` 的 `cloudflare_configured` 只表示是否配置 Token，不代表权限已验证。预览返回 `records`、`fingerprint` 和 `can_apply`；记录状态为 `create`、`unchanged`、`conflict`、`unavailable`。应用变更时重新读取 Cloudflare 并校验 fingerprint，冲突或过期预览返回 `409`。执行结果返回 `complete` 和各记录的 `created`、`unchanged`、`failed`、`skipped`；部分失败也可能返回 `200`，必须检查 `complete`。应用后清除该域名的旧验证状态，需等 DNS 生效后重新检查。
+
+SMTP 提交共用相同校验与队列，必须 STARTTLS 后认证。`From` 头只能包含一个发件人，其邮箱必须与 `MAIL FROM` 一致；显示名称会保留。一次只能接受一个 `RCPT TO`。SMTP `250 Queued as …` 表示已持久化入队，不表示最终送达。SMTP 本身不支持此 HTTP API 的幂等键。

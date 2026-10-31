@@ -16,13 +16,16 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 hex = "0.4"
 hickory-resolver = "0.24"
+hickory-proto = { version = "0.24", features = ["text-parsing"] }
 html-escape = "0.2"
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "ring", "webpki-roots", "dkim"] }
 mail-parser = "0.11"
 mailin = "0.6.5"
 minijinja = { version = "2", features = ["loader", "json"] }
 rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rsa = { version = "0.9", features = ["pem"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

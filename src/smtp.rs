@@ -114,7 +114,8 @@ impl Handler for Submission {
             .from()
             .and_then(|a| a.first())
             .and_then(|a| a.address.as_deref());
-        if from != Some(self.from.as_str()) {
+        if from != Some(self.from.as_str()) || message.from().is_none_or(|a| a.iter().count() != 1)
+        {
             return Response::custom(553, "Header From must match envelope MAIL FROM".into());
         }
         if message.attachment_count() > 0 {
@@ -122,6 +123,12 @@ impl Handler for Submission {
         }
         let input = SendRequest {
             from: self.from.clone(),
+            from_name: message
+                .from()
+                .and_then(|a| a.first())
+                .and_then(|a| a.name.as_deref())
+                .unwrap_or_default()
+                .to_owned(),
             to: self.recipient.clone(),
             subject: message.subject().unwrap_or_default().into(),
             html: message

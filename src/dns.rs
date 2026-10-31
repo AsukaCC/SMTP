@@ -22,7 +22,7 @@ pub struct Checks {
 }
 impl Checks {
     pub fn verified(&self) -> bool {
-        self.spf && self.dkim && self.dmarc && self.ptr && self.forward
+        self.spf && self.dkim && self.dmarc && self.forward
     }
 }
 
@@ -103,7 +103,7 @@ pub async fn identity(state: &AppState) -> anyhow::Result<(bool, bool)> {
                 .eq_ignore_ascii_case(&state.config.mail_hostname)
         }),
         Err(e) if absent(&e) => false,
-        Err(e) => return Err(e.into()),
+        Err(_) => false,
     };
     let forward = match state.dns.lookup_ip(&state.config.mail_hostname).await {
         Ok(addresses) => addresses.iter().any(|address| address == ip),
@@ -196,6 +196,22 @@ pub fn public_address(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ptr_is_advisory_but_other_checks_remain_required() {
+        let mut checks = Checks {
+            spf: true,
+            dkim: true,
+            dmarc: true,
+            forward: true,
+            ptr: false,
+        };
+        assert!(checks.verified());
+        checks.forward = false;
+        assert!(!checks.verified());
+        checks.forward = true;
+        checks.spf = false;
+        assert!(!checks.verified());
+    }
     #[test]
     fn blocks_private_mx_addresses() {
         for ip in [
