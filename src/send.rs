@@ -33,7 +33,7 @@ pub async fn test_send(
     Json(input): Json<TestRequest>,
 ) -> Result<(StatusCode, Json<Value>)> {
     auth.require_admin()?;
-    if !state.config.delivery_enabled || state.config.public_ip.is_none() {
+    if !state.delivery_enabled().await? {
         return Err(AppError::conflict(
             "Complete delivery configuration before sending a test",
         ));
@@ -181,9 +181,9 @@ pub async fn enqueue(
         }
         return Ok((id, false));
     }
-    if !state.config.delivery_enabled {
+    if !state.delivery_enabled().await? {
         return Err(AppError::conflict(
-            "Delivery is paused. Configure DNS and enable DELIVERY_ENABLED",
+            "Delivery is paused. Enable delivery in Settings",
         ));
     }
     if !state.rate_limit(format!("send:{scope}"), 60, 60) {

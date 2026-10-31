@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         None
     };
     let worker = tokio::spawn(queue::run(state.clone(), stop_rx));
-    tracing::info!(address=%state.config.bind,version=env!("CARGO_PKG_VERSION"),delivery=state.config.delivery_enabled,"BunMail RS started");
+    tracing::info!(address=%state.config.bind,version=env!("CARGO_PKG_VERSION"),delivery=state.delivery_enabled().await?,"BunMail RS started");
     let signal_tx = stop_tx.clone();
     axum::serve(
         listener,

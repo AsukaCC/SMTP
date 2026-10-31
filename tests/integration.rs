@@ -61,6 +61,180 @@ async fn request(
     )
 }
 
+async fn verify_delivery_switch(state: &AppState, cookie: &str, bearer: &str, input: &SendRequest) {
+    let mut config = (*state.config).clone();
+    config.delivery_enabled = false;
+    let mut fixture = state.clone();
+    fixture.config = Arc::new(config.clone());
+    let app = web::router(fixture.clone());
+    let path = "/api/v1/config/delivery";
+    assert!(!fixture.delivery_enabled().await.unwrap());
+    for (credential, origin, status) in [
+        (None, true, StatusCode::UNAUTHORIZED),
+        (Some(bearer), true, StatusCode::FORBIDDEN),
+        (Some(cookie), false, StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                path,
+                json!({"enabled":true}),
+                credential,
+                origin
+            )
+            .await
+            .0,
+            status
+        );
+    }
+    config.public_ip = None;
+    let mut missing_ip = fixture.clone();
+    missing_ip.config = Arc::new(config);
+    assert_eq!(
+        request(
+            &web::router(missing_ip.clone()),
+            "PUT",
+            path,
+            json!({"enabled":true}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE domains SET checked_at=now()-interval '25 hours'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            path,
+            json!({"enabled":true}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE domains SET checked_at=now()")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            path,
+            json!({"enabled":true}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(fixture.delivery_enabled().await.unwrap());
+    assert!(!missing_ip.delivery_enabled().await.unwrap());
+    // Fresh app state reads the persisted switch even when the environment default is false.
+    let restarted = web::router(fixture.clone());
+    assert_eq!(
+        request(
+            &restarted,
+            "GET",
+            "/api/v1/config",
+            json!({}),
+            Some(cookie),
+            false
+        )
+        .await
+        .2["ready_to_test"],
+        true
+    );
+    let (id, _) = send::enqueue(&fixture, &Auth { api_key_id: None }, input.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            path,
+            json!({"enabled":false}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(!state.delivery_enabled().await.unwrap());
+    assert!(
+        send::enqueue(state, &Auth { api_key_id: None }, input.clone(), None)
+            .await
+            .is_err()
+    );
+    assert!(queue::claim(state).await.unwrap().is_none());
+    let status: String = sqlx::query_scalar("SELECT status FROM emails WHERE id=$1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "queued");
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/emails/test",
+            json!({"from":"test@example.test","to":"recipient@example.net","language":"en"}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/emails/{id}/retry"),
+            json!({}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            path,
+            json!({"enabled":true}),
+            Some(cookie),
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(queue::claim(state).await.unwrap().unwrap().id, id);
+    sqlx::query("DELETE FROM emails WHERE id=$1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM delivery_settings")
+        .execute(&state.db)
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Requires TEST_DATABASE_URL; creates and drops its own isolated database"]
 async fn authenticated_api_queue_and_dkim() {
@@ -270,6 +444,7 @@ async fn authenticated_api_queue_and_dkim() {
     assert_eq!(configuration["ready_to_test"], true);
     assert_eq!(configuration["rdns_warning"], true);
     assert_eq!(configuration["cloudflare_configured"], false);
+    verify_delivery_switch(&state, &cookie, &bearer, &send_input).await;
     let (first, second) = tokio::join!(
         send::enqueue(
             &state,
@@ -514,6 +689,7 @@ async fn authenticated_api_queue_and_dkim() {
         let address = listener.local_addr().unwrap();
         let mut browser_config = (*state.config).clone();
         browser_config.app_url = format!("http://{address}").parse().unwrap();
+        browser_config.delivery_enabled = false;
         let mut browser_state = state.clone();
         browser_state.config = Arc::new(browser_config);
         // Isolated database and no delivery worker: browser test can enqueue but never send externally.

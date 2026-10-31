@@ -48,6 +48,11 @@ Object.assign(ZH,{
   "Workspace":"工作空间","Mail operations":"邮件管理","Configuration":"配置状态","Ready":"已就绪","Incomplete":"待完成","Verified sender":"已验证的发信域名","Delivery switch":"投递开关","Send test email":"发送测试邮件","Email language":"邮件语言","Delivery test":"投递测试","Test submitted":"测试已提交","Refresh status":"刷新状态","Open record":"查看记录","Preview":"预览","Refresh preview":"刷新预览","Desktop preview":"桌面预览","Mobile preview":"手机预览","Use template":"使用模板","Initial templates":"添加初始模板","Initial templates added":"初始模板已添加，已有内容保持不变","All languages":"全部语言","Search templates":"搜索模板","Custom template":"自定义模板","Welcome":"欢迎邮件","Verification code":"验证码","Notification":"事务通知","Variables":"变量","Updated":"更新时间","Copy template ID":"复制模板 ID","No matching templates":"没有匹配的模板","Template preview":"模板预览","No preview yet":"暂无预览","Configuration incomplete":"发信配置未完成","Domain verification":"域名验证","Complete delivery configuration before sending a test":"完成发信配置后才能发送测试邮件","Unsupported email language":"不支持的邮件语言","Delivery test status":"测试投递状态","Message preview":"邮件预览","Edit content":"编辑内容","Sender domains":"发信域名","Template library":"模板库","Restore initial templates?":"添加缺少的初始模板？已有模板不会被覆盖。","Template requires a name, subject and message body within the size limits":"请填写名称、主题和正文，并确认内容未超过大小限制"
 });
 const esc = value => String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll(String.fromCharCode(34),"&quot;").replaceAll("'","&#39;");
+Object.assign(ZH,{
+  "Delivery is paused. Enable delivery in Settings":"投递已暂停，请在服务设置中开启投递",
+  "Enable delivery and resume queued messages?":"开启投递并继续发送队列中的邮件？",
+  "Queued messages are preserved. In-flight delivery may still complete.":"待发送邮件会保留，正在投递的邮件仍可能完成。"
+});
 Object.assign(ZH,{"Check again in {seconds}s":"{seconds} 秒后可重新检查","DNS verification passed":"DNS 验证已通过","DNS records are not fully verified":"DNS 记录尚未全部通过验证"});
 const verifyCooldowns = new Map(), verifyPending = new Set();
 Object.assign(ZH,{
@@ -157,6 +162,8 @@ async function render() {
   shell();$("#content").innerHTML=`<div class="loading">${tr("Loading")}…</div>`;
   try {
     config=await api("/config");
+    if(request!==sequence)return;
+    shell();
     let html="";
     if(current==="dashboard") {
       const [stats,emails]=await Promise.all([api("/stats"),api("/emails")]);
@@ -195,7 +202,8 @@ async function render() {
 function testButton(){return `<button class="btn primary" data-action="test-email">${icon("send-horizontal")}${tr("Send test email")}</button>`;}
 function readiness(){
   const checks=[[!!config.public_ip,"Public IP",config.public_ip||t("Not configured")],[!!config.verified_domains?.length,"Verified sender",config.verified_domains?.join(", ")||t("Pending")],[config.delivery_enabled,"Delivery switch",t(config.delivery_enabled?"Enabled":"Disabled")]];
-  return `<section class="readiness" aria-label="${tr("Configuration")}"><div class="section-head"><div class="row"><h2>${tr("Configuration")}</h2><span class="badge ${config.ready_to_test?"verified":"pending"}">${tr(config.ready_to_test?"Ready":"Incomplete")}</span></div>${config.ready_to_test?testButton():`<a class="btn link" href="#domains">${tr("Domain checks")}${icon("arrow-up-right")}</a>`}</div><div class="readiness-steps">${checks.map(([ok,label,value])=>`<div class="readiness-step ${ok?"complete":""}">${icon(ok?"circle-check":"circle-dashed")}<div><span>${tr(label)}</span><strong>${esc(value)}</strong></div></div>`).join("")}</div></section>`;
+  const canEnable=!!config.public_ip&&!!config.verified_domains?.length;
+  return `<section class="readiness" aria-label="${tr("Configuration")}"><div class="section-head"><div class="row"><h2>${tr("Configuration")}</h2><span class="badge ${config.ready_to_test?"verified":"pending"}">${tr(config.ready_to_test?"Ready":"Incomplete")}</span></div>${config.ready_to_test?testButton():`<a class="btn link" href="${canEnable?'#settings':'#domains'}">${tr(canEnable?"Settings":"Domain checks")}${icon("arrow-up-right")}</a>`}</div><div class="readiness-steps">${checks.map(([ok,label,value])=>`<div class="readiness-step ${ok?"complete":""}">${icon(ok?"circle-check":"circle-dashed")}<div><span>${tr(label)}</span>${label==="Delivery switch"&&section()==="settings"?`<button type="button" class="btn delivery-toggle" role="switch" aria-checked="${config.delivery_enabled}" aria-label="${tr("Delivery switch")}" data-action="toggle-delivery" ${!config.delivery_enabled&&!canEnable?'disabled':''} title="${tr(canEnable?"Delivery switch":"Please configure a public IP and DNS before enabling delivery.")}">${icon(config.delivery_enabled?"toggle-right":"toggle-left")}${esc(value)}</button>`:`<strong>${esc(value)}</strong>`}</div></div>`).join("")}</div>${section()==="settings"?`<p class="muted delivery-note">${tr(!canEnable&&!config.delivery_enabled?"Please configure a public IP and DNS before enabling delivery.":"Queued messages are preserved. In-flight delivery may still complete.")}</p>`:""}</section>`;
 }
 async function loadTemplates(){const result=await api("/templates");templates=result.data;presets=result.presets||[];}
 function variableNames(row){return [...new Set([...`${row.subject} ${row.html} ${row.text}`.matchAll(/\{\{\s*(\w+)\s*\}\}/g)].map(match=>match[1]))];}
@@ -289,6 +297,12 @@ document.addEventListener("click",async event=>{
   const id=action.dataset.id;if(action.disabled)return;action.disabled=true;
   try {
     switch(action.dataset.action){
+      case "toggle-delivery":{
+        const enabled=action.getAttribute("aria-checked")!=="true";
+        if(enabled&&!confirm(t("Enable delivery and resume queued messages?")))break;
+        await api("/config/delivery",{method:"PUT",body:JSON.stringify({enabled})});
+        toast(enabled?"Delivery enabled":"Delivery paused");await render();break;
+      }
       case "cloudflare":openCloudflare(id);break;
       case "cloudflare-preview":await previewCloudflare(id);break;
       case "cloudflare-apply":await applyCloudflare(id);break;

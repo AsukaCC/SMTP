@@ -33,13 +33,42 @@ pub async fn config(auth: Auth, State(state): State<AppState>) -> Result<Json<Va
         .filter(|d| d.can_send())
         .map(|d| d.name.as_str())
         .collect();
-    let ready_to_test = state.config.delivery_enabled
-        && state.config.public_ip.is_some()
-        && !verified_domains.is_empty();
+    let delivery_enabled = state.delivery_enabled().await?;
+    let ready_to_test =
+        delivery_enabled && state.config.public_ip.is_some() && !verified_domains.is_empty();
     let rdns_warning: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM domains WHERE checked_at IS NOT NULL AND COALESCE(checks->>'ptr','false') <> 'true')").fetch_one(&state.db).await?;
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"mail_hostname":state.config.mail_hostname,"public_ip":state.config.public_ip,"delivery_enabled":state.config.delivery_enabled,"smtp_enabled":state.config.smtp_bind.is_some(),"smtp_tls":state.config.smtp_cert.is_some(),"smtp_port":state.config.smtp_bind.map(|a|a.port()),"verified_domains":verified_domains,"ready_to_test":ready_to_test,"rdns_warning":rdns_warning,"cloudflare_configured":state.config.cloudflare_api_token.is_some()}),
+        json!({"version":env!("CARGO_PKG_VERSION"),"mail_hostname":state.config.mail_hostname,"public_ip":state.config.public_ip,"delivery_enabled":delivery_enabled,"smtp_enabled":state.config.smtp_bind.is_some(),"smtp_tls":state.config.smtp_cert.is_some(),"smtp_port":state.config.smtp_bind.map(|a|a.port()),"verified_domains":verified_domains,"ready_to_test":ready_to_test,"rdns_warning":rdns_warning,"cloudflare_configured":state.config.cloudflare_api_token.is_some()}),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverySetting {
+    enabled: bool,
+}
+
+pub async fn set_delivery(
+    auth: Auth,
+    State(state): State<AppState>,
+    Json(input): Json<DeliverySetting>,
+) -> Result<Json<Value>> {
+    auth.require_admin()?;
+    if input.enabled {
+        let domains = sqlx::query_as::<_, Domain>("SELECT * FROM domains")
+            .fetch_all(&state.db)
+            .await?;
+        if state.config.public_ip.is_none() || !domains.iter().any(Domain::can_send) {
+            return Err(AppError::conflict(
+                "Please configure a public IP and DNS before enabling delivery.",
+            ));
+        }
+    }
+    sqlx::query("INSERT INTO delivery_settings (id,enabled) VALUES (TRUE,$1) ON CONFLICT (id) DO UPDATE SET enabled=EXCLUDED.enabled")
+        .bind(input.enabled)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(json!({"delivery_enabled":input.enabled})))
 }
 
 pub async fn stats(auth: Auth, State(state): State<AppState>) -> Result<Json<Value>> {
@@ -346,7 +375,7 @@ pub async fn retry_email(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>> {
     auth.require_admin()?;
-    if !state.config.delivery_enabled {
+    if !state.delivery_enabled().await? {
         return Err(AppError::conflict("Delivery is paused"));
     }
     let row=sqlx::query("UPDATE emails SET status='queued',attempts=0,next_attempt_at=now(),last_error=NULL WHERE id=$1 AND status='failed'").bind(id).execute(&state.db).await?;

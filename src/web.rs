@@ -72,6 +72,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
         .route("/api/v1/config", get(api::config))
+        .route(
+            "/api/v1/config/delivery",
+            axum::routing::put(api::set_delivery),
+        )
         .route("/api/v1/updates", get(crate::updates::status))
         .route("/api/v1/updates/check", post(crate::updates::check))
         .route("/api/v1/stats", get(api::stats))

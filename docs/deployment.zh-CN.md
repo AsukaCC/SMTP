@@ -22,7 +22,7 @@ python3 scripts/setup.py
 | `BOOTSTRAP_PASSWORD` | 自动生成的初始管理员密码，仅首次初始化生效 |
 | `MAIL_HOSTNAME` | SMTP EHLO 身份，例如 `mail.example.com` |
 | `PUBLIC_IP` | 实际出站公网 IPv4 或 IPv6 |
-| `DELIVERY_ENABLED` | 初始保持 `false` |
+| `DELIVERY_ENABLED` | 初始保持 `false`；后台未保存投递开关时使用此值 |
 
 `POSTGRES_PASSWORD` 和 `DKIM_ENCRYPTION_KEY` 已自动生成。加密密钥不可丢失或随意替换，否则现有 DKIM 私钥无法解密。不要公开 `.env`、证书私钥、数据库备份或运行 `docker compose config` 输出完整配置；校验时用 `--quiet`。
 
@@ -73,7 +73,9 @@ mail-admin.example.com {
 3. 登录后台添加发信域名，根据页面记录设置 SPF、DKIM 和 DMARC。长 DKIM TXT 可由 DNS 平台分成多个字符串，但必须仍是同一条记录。
 4. 点击“检查 DNS”，确认 SPF、DKIM、DMARC、A/AAAA 四项通过。PTR 为可选告警；域名列表、发信入口和投递队列统一按最近 24 小时的这四项检查判断，不再依赖旧版本保存的 `verified` 标记。升级后，如果原有检查仍有效且四项通过，即使旧标记为未验证也允许发送；缺少检查结果或已过期时仍须重新检查。服务每小时重新检查；超过 24 小时未成功更新验证的域名不可发信。
 5. 确认服务器的实际出口 IP，尤其是多网卡、NAT 和 Docker IPv6 场景。设置 `PUBLIC_IP` 不会自动修改操作系统路由。
-6. 将 `.env` 的 `DELIVERY_ENABLED` 改为 `true`，执行 `docker compose up -d --wait app`。受管安装使用文档中的 `reconfigure` 命令。
+6. 在“服务设置 → 配置状态”开启“投递开关”。必须已配置公网 IP，且至少一个发信域名在最近 24 小时内通过四项必需 DNS 检查；缺少 PTR/rDNS 不阻止开启。开关保存在数据库中，立即生效并在重启、升级后保留，不需要修改 `.env` 或重建容器。暂停时保留队列，正在投递的邮件仍可能完成；再次开启会继续发送队列中的邮件。
+
+后台尚未保存开关时，兼容原有 `.env` 中的 `DELIVERY_ENABLED`；保存后以数据库中的开关为准。旧版本没有后台开关时，可设置 `DELIVERY_ENABLED=true` 并执行 `docker compose up -d --wait app`（受管安装使用 `reconfigure`）。本次后台开关新增 `0002_delivery_settings.sql` 数据库迁移，只添加开关表，不改动邮件、队列和域名数据。源码部署按上面的备份及更新流程执行，应用启动时运行迁移；受管安装因迁移指纹变化会拒绝自动更新和回退，需要单独安排迁移及恢复流程，不能跳过指纹校验。
 7. 发送到自己控制的测试收件箱，检查邮件原始头中的 SPF、DKIM、DMARC 结果及投递位置，再用于日常邮件。
 
 完成配置后刷新后台，“概览”和“服务设置”会出现“发送测试邮件”。填写已验证域名下的发件地址、自己的测试收件地址，并明确选择邮件语言。弹窗会跟踪队列状态；“对方已接收”仍需结合实际收件箱及原始头确认最终结果。配置缺失、关闭投递或域名验证失效时，此入口自动隐藏。

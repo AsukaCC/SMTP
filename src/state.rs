@@ -61,6 +61,14 @@ fn check_limit(
 }
 
 impl AppState {
+    pub async fn delivery_enabled(&self) -> Result<bool, sqlx::Error> {
+        let saved: Option<bool> =
+            sqlx::query_scalar("SELECT enabled FROM delivery_settings WHERE id=TRUE")
+                .fetch_optional(&self.db)
+                .await?;
+        Ok(saved.unwrap_or(self.config.delivery_enabled) && self.config.public_ip.is_some())
+    }
+
     pub fn rate_limit(&self, key: String, max: u32, seconds: u64) -> bool {
         self.check_rate_limit(key, max, seconds).allowed
     }

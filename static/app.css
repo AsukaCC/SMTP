@@ -236,4 +236,7 @@ details summary { cursor: pointer; font-size: 12px; color: var(--green); padding
   .template-toolbar .filter { width: 130px; flex-shrink: 0; }
   .template-card-foot { flex-wrap: nowrap; }
 }
+.delivery-toggle { min-width: 106px; min-height: 36px; margin-top: 4px; }
+.delivery-toggle[aria-checked="true"] { color: #187346; }
+.delivery-note { margin: 16px 0 0; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }

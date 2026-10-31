@@ -47,7 +47,7 @@ Idempotency-Key: order-20261031-001
 
 `POST /templates/preview` 使用 `application/x-www-form-urlencoded`：提供 `template_id` 或 `subject`、`html`、`text`，以及 JSON 字符串形式的 `variables`。返回隔离的 HTML 文档，仅供后台 iframe 预览；脚本、外部资源和表单提交均由 CSP 禁止，不提供远程图片预览。预览不入队，不要求启用投递。
 
-`GET /config` 中的 `ready_to_test` 同时检查公网 IP、投递开关和有效发信域名。后台据此显示测试入口。发送测试仅允许管理员会话，并需要 `Origin`：
+`GET /config` 中的 `ready_to_test` 同时检查公网 IP、投递开关和有效发信域名。后台据此显示测试入口。管理员可通过 `PUT /config/delivery` 提交 `{"enabled":true}` 或 `{"enabled":false}` 切换投递，需要管理员会话和匹配的 `Origin`，发信 API 密钥无权修改。开启要求公网 IP 和最近 24 小时内有效的发信域名，PTR/rDNS 仅提示。开关保存在数据库并覆盖环境变量的初始值；暂停保留队列，正在投递的邮件仍可能完成。发送测试仅允许管理员会话，并需要 `Origin`：
 
 ```http
 POST /api/v1/emails/test

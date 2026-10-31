@@ -225,6 +225,9 @@ pub async fn deliver(
 }
 
 pub async fn claim(state: &AppState) -> Result<Option<Email>, sqlx::Error> {
+    if !state.delivery_enabled().await? {
+        return Ok(None);
+    }
     let token = Uuid::new_v4();
     sqlx::query_as("UPDATE emails SET status='sending',lease_until=now()+interval '5 minutes',lease_token=$1,attempts=attempts+1 WHERE id=(SELECT id FROM emails WHERE (status='queued' AND next_attempt_at<=now()) OR (status='sending' AND lease_until<now()) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *")
         .bind(token).fetch_optional(&state.db).await
@@ -291,32 +294,29 @@ pub async fn run(state: AppState, mut shutdown: tokio::sync::watch::Receiver<boo
                 .await;
             refresh = tokio::time::Instant::now();
         }
-        if state.config.delivery_enabled {
-            match claim(&state).await {
-                Ok(Some(email)) => {
-                    let result =
-                        match sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE id=$1")
-                            .bind(email.domain_id)
-                            .fetch_one(&state.db)
-                            .await
-                        {
-                            Ok(domain) => tokio::time::timeout(
-                                Duration::from_secs(120),
-                                deliver(&state, &email, &domain),
-                            )
-                            .await
-                            .unwrap_or_else(|_| {
-                                Err(DeliveryError::temporary("Delivery attempt timed out"))
-                            }),
-                            Err(_) => Err(DeliveryError::temporary("Sender domain is unavailable")),
-                        };
-                    if finish(&state, &email, result).await.is_err() {
-                        tracing::error!(email_id=%email.id,"Could not save delivery outcome");
-                    }
+        match claim(&state).await {
+            Ok(Some(email)) => {
+                let result = match sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE id=$1")
+                    .bind(email.domain_id)
+                    .fetch_one(&state.db)
+                    .await
+                {
+                    Ok(domain) => tokio::time::timeout(
+                        Duration::from_secs(120),
+                        deliver(&state, &email, &domain),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(DeliveryError::temporary("Delivery attempt timed out"))
+                    }),
+                    Err(_) => Err(DeliveryError::temporary("Sender domain is unavailable")),
+                };
+                if finish(&state, &email, result).await.is_err() {
+                    tracing::error!(email_id=%email.id,"Could not save delivery outcome");
                 }
-                Err(_) => tracing::error!("Queue claim failed"),
-                _ => {}
             }
+            Err(_) => tracing::error!("Queue claim failed"),
+            _ => {}
         }
         tokio::select! { _=tokio::time::sleep(Duration::from_secs(1))=>{},_=shutdown.changed()=>{} }
     }
