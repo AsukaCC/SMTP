@@ -71,7 +71,7 @@ mail-admin.example.com {
 1. 为 `MAIL_HOSTNAME` 添加 A 或 AAAA，指向 `PUBLIC_IP`。
 2. 建议在服务器供应商的控制台把 `PUBLIC_IP` 的 PTR 设置为 `MAIL_HOSTNAME`。PTR 不能通过普通域名 DNS 面板代设；缺失、不匹配或查询异常时显示告警，不阻止发送。
 3. 登录后台添加发信域名，根据页面记录设置 SPF、DKIM 和 DMARC。长 DKIM TXT 可由 DNS 平台分成多个字符串，但必须仍是同一条记录。
-4. 点击“检查 DNS”，确认 SPF、DKIM、DMARC、A/AAAA 四项通过。PTR 为可选告警；升级本次逻辑后，对以前因 PTR 未通过的域名重新检查即可。服务每小时重新检查；超过 24 小时未成功更新验证的域名不可发信。
+4. 点击“检查 DNS”，确认 SPF、DKIM、DMARC、A/AAAA 四项通过。PTR 为可选告警；域名列表、发信入口和投递队列统一按最近 24 小时的这四项检查判断，不再依赖旧版本保存的 `verified` 标记。升级后，如果原有检查仍有效且四项通过，即使旧标记为未验证也允许发送；缺少检查结果或已过期时仍须重新检查。服务每小时重新检查；超过 24 小时未成功更新验证的域名不可发信。
 5. 确认服务器的实际出口 IP，尤其是多网卡、NAT 和 Docker IPv6 场景。设置 `PUBLIC_IP` 不会自动修改操作系统路由。
 6. 将 `.env` 的 `DELIVERY_ENABLED` 改为 `true`，执行 `docker compose up -d --wait app`。受管安装使用文档中的 `reconfigure` 命令。
 7. 发送到自己控制的测试收件箱，检查邮件原始头中的 SPF、DKIM、DMARC 结果及投递位置，再用于日常邮件。

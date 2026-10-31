@@ -193,8 +193,16 @@ pub async fn enqueue(
             "Sending rate exceeded".into(),
         ));
     }
-    let domain = sqlx::query_as::<_,Domain>("SELECT * FROM domains WHERE name=$1 AND verified=TRUE AND checked_at > now()-interval '24 hours'")
-        .bind(from.domain().to_lowercase()).fetch_optional(&state.db).await?.ok_or_else(||AppError::invalid("Verify the sender domain DNS within the last 24 hours before sending"))?;
+    let domain = sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE name=$1")
+        .bind(from.domain().to_lowercase())
+        .fetch_optional(&state.db)
+        .await?
+        .filter(Domain::can_send)
+        .ok_or_else(|| {
+            AppError::invalid(
+                "Verify the sender domain DNS within the last 24 hours before sending",
+            )
+        })?;
     if let Some(id) = input.template_id {
         let template = sqlx::query_as::<_, Template>("SELECT * FROM templates WHERE id=$1")
             .bind(id)

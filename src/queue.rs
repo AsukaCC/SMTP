@@ -178,11 +178,7 @@ pub async fn deliver(
     email: &Email,
     domain: &Domain,
 ) -> std::result::Result<(), DeliveryError> {
-    if !domain.verified
-        || domain
-            .checked_at
-            .is_none_or(|t| t < Utc::now() - ChronoDuration::hours(24))
-    {
+    if !domain.can_send() {
         return Err(DeliveryError::temporary(
             "Sender DNS verification is missing or expired",
         ));

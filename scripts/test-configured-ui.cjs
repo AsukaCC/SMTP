@@ -41,6 +41,7 @@ const fs=require('node:fs');
     assert((await page.locator('#dialog').textContent()).includes('自用通知'));
     await page.locator('#dialog [data-action=close]').click();
     await page.locator('nav a[href="#domains"]').click();
+    await page.locator('.domain .badge.verified').waitFor();
     await page.locator('[data-action=cloudflare]').first().click();
     await page.locator('#cloudflare-content .error').waitFor();
     assert(await page.locator('[data-action=cloudflare-apply]').isDisabled());

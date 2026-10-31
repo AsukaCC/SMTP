@@ -25,8 +25,14 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<Value>> {
 
 pub async fn config(auth: Auth, State(state): State<AppState>) -> Result<Json<Value>> {
     auth.require_admin()?;
-    let verified_domains: Vec<String> = sqlx::query_scalar("SELECT name FROM domains WHERE verified=TRUE AND checked_at>now()-interval '24 hours' ORDER BY name")
-        .fetch_all(&state.db).await?;
+    let domains = sqlx::query_as::<_, Domain>("SELECT * FROM domains ORDER BY name")
+        .fetch_all(&state.db)
+        .await?;
+    let verified_domains: Vec<&str> = domains
+        .iter()
+        .filter(|d| d.can_send())
+        .map(|d| d.name.as_str())
+        .collect();
     let ready_to_test = state.config.delivery_enabled
         && state.config.public_ip.is_some()
         && !verified_domains.is_empty();
@@ -46,9 +52,13 @@ pub async fn stats(auth: Auth, State(state): State<AppState>) -> Result<Json<Val
 
 pub async fn list_domains(auth: Auth, State(state): State<AppState>) -> Result<Json<Value>> {
     auth.require_admin()?;
-    let rows = sqlx::query_as::<_, Domain>("SELECT * FROM domains ORDER BY created_at DESC")
+    let mut rows = sqlx::query_as::<_, Domain>("SELECT * FROM domains ORDER BY created_at DESC")
         .fetch_all(&state.db)
         .await?;
+    // The stored flag may reflect an older verification policy that required PTR.
+    for domain in &mut rows {
+        domain.verified = domain.can_send();
+    }
     Ok(Json(
         json!({"data":rows.iter().map(|d|json!({"domain":d,"records":dns::records(&state,d),"retry_after_seconds":state.retry_after_seconds(&format!("verify:{}",d.id),3)})).collect::<Vec<_>>()}),
     ))

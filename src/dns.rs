@@ -3,7 +3,7 @@ use hickory_resolver::{
     error::{ResolveError, ResolveErrorKind},
     proto::op::ResponseCode,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 #[derive(Serialize, Clone)]
@@ -12,7 +12,8 @@ pub struct DnsRecord {
     pub name: String,
     pub value: String,
 }
-#[derive(Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
 pub struct Checks {
     pub spf: bool,
     pub dkim: bool,

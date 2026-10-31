@@ -242,6 +242,22 @@ async fn authenticated_api_queue_and_dkim() {
             .is_err()
     );
     verify_without_ptr(&state, &cookie, &stored).await;
+    // Reproduce an upgrade with fresh required checks but the old PTR-dependent flag.
+    sqlx::query("UPDATE domains SET verified=false WHERE id=$1")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (_, _, listing) = request(
+        &app,
+        "GET",
+        "/api/v1/domains",
+        json!({}),
+        Some(&cookie),
+        false,
+    )
+    .await;
+    assert_eq!(listing["data"][0]["domain"]["verified"], true);
     let (_, _, configuration) = request(
         &app,
         "GET",
@@ -288,6 +304,14 @@ async fn authenticated_api_queue_and_dkim() {
         .fetch_one(&db)
         .await
         .unwrap();
+    assert!(!domain.verified);
+    assert!(domain.can_send());
+    let mut invalid_key = domain.clone();
+    invalid_key.private_key.clear();
+    let error = queue::deliver(&state, &email, &invalid_key)
+        .await
+        .unwrap_err();
+    assert_eq!(error.detail, "Could not build or sign the message");
     let signed = queue::build_message(&email, &domain, &[42; 32]).unwrap();
     let raw = String::from_utf8(signed.formatted()).unwrap();
     let parsed = mail_parser::MessageParser::default()
@@ -482,6 +506,10 @@ async fn authenticated_api_queue_and_dkim() {
     smtp_task.await.unwrap();
     verify_templates_preview_and_test_send(&app, &state, &cookie, &bearer).await;
     if std::env::var("BUNMAIL_BROWSER_TEST").as_deref() == Ok("true") {
+        sqlx::query("UPDATE domains SET verified=false")
+            .execute(&db)
+            .await
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut browser_config = (*state.config).clone();

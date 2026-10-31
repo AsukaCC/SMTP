@@ -18,6 +18,59 @@ pub struct Domain {
     pub created_at: DateTime<Utc>,
 }
 
+impl Domain {
+    pub fn can_send(&self) -> bool {
+        self.checked_at
+            .is_some_and(|at| at > Utc::now() - chrono::Duration::hours(24))
+            && serde_json::from_value::<crate::dns::Checks>(self.checks.clone())
+                .is_ok_and(|checks| checks.verified())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sender_eligibility_uses_fresh_required_checks_instead_of_cached_flag() {
+        let mut domain = Domain {
+            id: Uuid::nil(),
+            name: "example.test".into(),
+            selector: "bunmail".into(),
+            public_key: String::new(),
+            private_key: String::new(),
+            verified: false,
+            checks: json!({"spf":true,"dkim":true,"dmarc":true,"forward":true,"ptr":false}),
+            checked_at: Some(Utc::now()),
+            created_at: Utc::now(),
+        };
+        assert!(domain.can_send());
+        let good = domain.checks.clone();
+        domain.verified = true;
+        for key in ["spf", "dkim", "dmarc", "forward"] {
+            domain.checks = good.clone();
+            domain.checks[key] = json!(false);
+            assert!(!domain.can_send());
+            domain.checks.as_object_mut().unwrap().remove(key);
+            assert!(!domain.can_send());
+        }
+        for invalid in [
+            json!({}),
+            json!(null),
+            json!({"spf":"true","dkim":true,"dmarc":true,"forward":true}),
+        ] {
+            domain.checks = invalid;
+            assert!(!domain.can_send());
+        }
+        domain.checks = good;
+        domain.checked_at = Some(Utc::now() - chrono::Duration::hours(25));
+        assert!(!domain.can_send());
+        domain.checked_at = None;
+        assert!(!domain.can_send());
+    }
+}
+
 #[derive(FromRow, Serialize, Deserialize, Clone)]
 pub struct Template {
     pub id: Uuid,
