@@ -23,6 +23,7 @@ python3 scripts/setup.py
 | `MAIL_HOSTNAME` | SMTP EHLO 身份，例如 `mail.example.com` |
 | `PUBLIC_IP` | 实际出站公网 IPv4 或 IPv6 |
 | `DELIVERY_ENABLED` | 初始保持 `false`；后台未保存投递开关时使用此值 |
+| `API_ALLOWED_ORIGINS` | 可选浏览器 API 来源白名单，逗号分隔 HTTPS origin；默认空，网站后端调用不需要此配置 |
 
 `POSTGRES_PASSWORD` 和 `DKIM_ENCRYPTION_KEY` 已自动生成。加密密钥不可丢失或随意替换，否则现有 DKIM 私钥无法解密。不要公开 `.env`、证书私钥、数据库备份或运行 `docker compose config` 输出完整配置；校验时用 `--quiet`。
 

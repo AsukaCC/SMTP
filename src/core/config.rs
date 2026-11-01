@@ -23,6 +23,7 @@ pub struct Config {
     pub development: bool,
     pub update_repository: Option<String>,
     pub cloudflare_api_token: Option<zeroize::Zeroizing<String>>,
+    pub api_allowed_origins: Vec<String>,
 }
 
 fn required(key: &str) -> Result<String> {
@@ -108,6 +109,10 @@ impl Config {
             smtp_cert,
             smtp_key,
             development,
+            api_allowed_origins: allowed_origins(
+                &env::var("API_ALLOWED_ORIGINS").unwrap_or_default(),
+                development,
+            )?,
             update_repository: crate::updates::repository(
                 &env::var("UPDATE_REPOSITORY").unwrap_or_else(|_| "AsukaCC/SMTP".into()),
             )?,
@@ -117,6 +122,36 @@ impl Config {
                 .map(zeroize::Zeroizing::new),
         })
     }
+}
+
+pub fn allowed_origins(value: &str, development: bool) -> Result<Vec<String>> {
+    let mut origins = Vec::new();
+    for item in value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let url = Url::parse(item).context("Invalid API_ALLOWED_ORIGINS")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || url.host_str().is_some_and(|host| host.contains('*'))
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || (!development && url.scheme() != "https")
+        {
+            bail!(
+                "API_ALLOWED_ORIGINS requires exact HTTPS origins (HTTP is allowed in development)"
+            );
+        }
+        let origin = url.origin().ascii_serialization();
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    Ok(origins)
 }
 
 pub fn valid_domain(value: &str) -> bool {
@@ -133,4 +168,28 @@ pub fn valid_domain(value: &str) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
         && value.parse::<IpAddr>().is_err()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cors_origins_are_exact_and_normalized() {
+        assert_eq!(
+            allowed_origins(" https://example.com:443/,https://example.com ", false).unwrap(),
+            vec!["https://example.com"]
+        );
+        assert!(allowed_origins("http://localhost:4000", true).is_ok());
+        for value in [
+            "*",
+            "null",
+            "https://*.example.com",
+            "https://example.com/path",
+            "https://user:secret@example.com",
+            "https://example.com?q=1",
+            "http://example.com",
+        ] {
+            assert!(allowed_origins(value, false).is_err());
+        }
+    }
 }

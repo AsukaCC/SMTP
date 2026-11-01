@@ -18,10 +18,10 @@ pub struct Preset {
 }
 
 pub fn presets() -> Vec<Preset> {
-    let mut presets: Vec<Preset> = serde_json::from_str(include_str!("../emails/presets.json"))
+    let mut presets: Vec<Preset> = serde_json::from_str(include_str!("../../emails/presets.json"))
         .expect("bundled email presets must be valid");
     for preset in &mut presets {
-        preset.html = include_str!("../emails/layout.html")
+        preset.html = include_str!("../../emails/layout.html")
             .replace("<!--LANG-->", &preset.language)
             .replace("<!--CONTENT-->", &preset.html)
             .replace(

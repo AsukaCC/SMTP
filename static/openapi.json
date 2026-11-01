@@ -1,0 +1,98 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "BunMail RS Public API",
+    "version": "0.1.0",
+    "description": "Bearer-authenticated sending and access to messages submitted by the same API key. 202 means persisted in the queue, not delivered. Administrator endpoints and SMTP are documented separately. Request bodies are limited to 1 MiB. Every API response includes X-Request-ID."
+  },
+  "servers": [{"url": "/api/v1"}],
+  "security": [{"bearerAuth": []}],
+  "paths": {
+    "/auth/check": {
+      "get": {
+        "operationId": "checkAuthentication",
+        "summary": "Validate credentials without sending or reading email",
+        "responses": {
+          "200": {"description": "Authenticated", "headers": {"X-Request-ID": {"$ref": "#/components/headers/RequestId"}}, "content": {"application/json": {"schema": {"type": "object", "required": ["authenticated", "scope"], "properties": {"authenticated": {"const": true}, "scope": {"type": "string", "enum": ["send", "admin"]}}}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/emails/send": {
+      "post": {
+        "operationId": "sendEmail",
+        "summary": "Queue one email",
+        "description": "Requires enabled delivery and sender SPF/DKIM/DMARC/forward DNS verified within 24 hours. PTR/rDNS is advisory. Retry a timeout or retryable server error with the same idempotency key and identical payload. A changed payload with the same key returns 409. Idempotency is scoped to the credential and prevents duplicate queue entries, not SMTP duplicates.",
+        "parameters": [{"name": "Idempotency-Key", "in": "header", "required": false, "description": "Strongly recommended. Printable ASCII, 1-128 bytes, stable for the same business event. Retained with the queued record.", "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[ -~]+$"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SendRequest"}, "examples": {
+          "plain": {"value": {"from": "hello@example.com", "from_name": "Notifications", "to": "recipient@example.net", "subject": "Welcome", "text": "Welcome to our service"}},
+          "template": {"value": {"from": "hello@example.com", "to": "recipient@example.net", "template_id": "bee00000-0000-4000-8000-000000000005", "variables": {"brand": "Example", "name": "Alex", "message": "Welcome to our service"}}}
+        }}}},
+        "responses": {
+          "202": {"$ref": "#/components/responses/Queued"},
+          "200": {"$ref": "#/components/responses/Queued"},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/emails": {
+      "get": {
+        "operationId": "listEmails",
+        "summary": "List messages belonging to the API key",
+        "description": "50 records per page, sorted by created_at and id descending. Offset pagination can shift when new messages arrive.",
+        "parameters": [
+          {"name": "page", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0}},
+          {"name": "status", "in": "query", "schema": {"$ref": "#/components/schemas/EmailStatus"}},
+          {"name": "search", "in": "query", "description": "Case-insensitive literal substring in subject/from/to. Percent and underscore are not wildcards.", "schema": {"type": "string", "maxLength": 200}}
+        ],
+        "responses": {
+          "200": {"description": "Message page", "headers": {"X-Request-ID": {"$ref": "#/components/headers/RequestId"}}, "content": {"application/json": {"schema": {"type": "object", "required": ["data", "page", "has_more"], "properties": {"data": {"type": "array", "maxItems": 50, "items": {"$ref": "#/components/schemas/EmailSummary"}}, "page": {"type": "integer", "minimum": 0}, "has_more": {"type": "boolean"}}}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/emails/{id}": {
+      "get": {
+        "operationId": "getEmail",
+        "summary": "Get an owned message and delivery attempts",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "responses": {
+          "200": {"description": "Message details. sent only means accepted by the recipient SMTP server.", "headers": {"X-Request-ID": {"$ref": "#/components/headers/RequestId"}}, "content": {"application/json": {"schema": {"type": "object", "required": ["email", "attempts"], "properties": {"email": {"$ref": "#/components/schemas/Email"}, "attempts": {"type": "array", "items": {"type": "object", "required": ["result", "detail", "created_at"], "properties": {"result": {"type": "string"}, "detail": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}}}}}}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "description": "API key created by the administrator. Keep it in the website backend, never in public frontend bundles."}},
+    "headers": {"RequestId": {"description": "Server-generated correlation UUID", "schema": {"type": "string", "format": "uuid"}}},
+    "responses": {
+      "Queued": {"description": "202 with created=true for a new queue entry; 200 with created=false when reusing the same idempotency key and payload.", "headers": {"X-Request-ID": {"$ref": "#/components/headers/RequestId"}}, "content": {"application/json": {"schema": {"type": "object", "required": ["id", "created"], "properties": {"id": {"type": "string", "format": "uuid"}, "created": {"type": "boolean"}}}}}},
+      "Error": {"description": "400 malformed JSON/path/query; 401 missing/invalid/revoked credential; 403 forbidden origin or administrator access required; 404 absent/not owned; 405 invalid method; 409 DELIVERY_PAUSED or IDEMPOTENCY_CONFLICT; 413 body over 1 MiB; 415 non-JSON content type; 422 INVALID_INPUT or DOMAIN_NOT_VERIFIED; 429 rate limited; 500 internal error. Retry only network failures and 429/502/503/504, using the same idempotency key; ambiguous failures must not trigger a new key.", "headers": {"X-Request-ID": {"$ref": "#/components/headers/RequestId"}, "Retry-After": {"description": "Seconds to wait after 429", "schema": {"type": "integer", "minimum": 1}}, "WWW-Authenticate": {"description": "Bearer challenge on 401", "schema": {"type": "string"}}}, "content": {"application/json": {"schema": {"type": "object", "required": ["error"], "properties": {"error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "retry_after_seconds": {"type": "integer", "minimum": 0}}}}}}}}
+    },
+    "schemas": {
+      "SendRequest": {
+        "type": "object", "additionalProperties": false, "required": ["from", "to"],
+        "properties": {
+          "from": {"type": "string", "format": "email", "maxLength": 254, "description": "One bare ASCII mailbox. No display name, array or SMTPUTF8."},
+          "from_name": {"type": "string", "description": "Optional display name, at most 256 UTF-8 bytes; control characters are forbidden."},
+          "to": {"type": "string", "format": "email", "maxLength": 254, "description": "One bare ASCII mailbox."},
+          "subject": {"type": "string", "maxLength": 998, "description": "At most 998 UTF-8 bytes, no CR/LF. Required without template_id."},
+          "html": {"type": "string", "description": "HTML body. html+text combined must be at most 512 KiB in UTF-8."},
+          "text": {"type": "string", "description": "Plain-text body; may be sent together with HTML as a MIME alternative."},
+          "template_id": {"type": ["string", "null"], "format": "uuid", "description": "Overrides subject/html/text. Obtain the UUID from the administrator."},
+          "variables": {"type": "object", "additionalProperties": true, "default": {}}
+        },
+        "anyOf": [
+          {"required": ["template_id"], "properties": {"template_id": {"type": "string", "format": "uuid"}}},
+          {"required": ["subject"], "properties": {"subject": {"minLength": 1}}, "anyOf": [{"required": ["html"], "properties": {"html": {"minLength": 1}}}, {"required": ["text"], "properties": {"text": {"minLength": 1}}}]}
+        ]
+      },
+      "EmailStatus": {"type": "string", "enum": ["queued", "sending", "sent", "failed", "cancelled"]},
+      "EmailSummary": {"type": "object", "required": ["id", "from_address", "to_address", "subject", "status", "attempts", "created_at", "sent_at", "last_error", "next_attempt_at"], "properties": {
+        "id": {"type": "string", "format": "uuid"}, "from_address": {"type": "string"}, "to_address": {"type": "string"}, "subject": {"type": "string"}, "status": {"$ref": "#/components/schemas/EmailStatus"}, "attempts": {"type": "integer", "minimum": 0}, "created_at": {"type": "string", "format": "date-time"}, "sent_at": {"type": ["string", "null"], "format": "date-time"}, "last_error": {"type": ["string", "null"]}, "next_attempt_at": {"type": "string", "format": "date-time"}
+      }},
+      "Email": {"allOf": [{"$ref": "#/components/schemas/EmailSummary"}, {"type": "object", "required": ["api_key_id", "domain_id", "html", "text", "message_id", "lease_until"], "properties": {"api_key_id": {"type": ["string", "null"], "format": "uuid"}, "domain_id": {"type": "string", "format": "uuid"}, "html": {"type": "string"}, "text": {"type": "string"}, "message_id": {"type": "string"}, "lease_until": {"type": ["string", "null"], "format": "date-time"}}}]}
+    }
+  }
+}

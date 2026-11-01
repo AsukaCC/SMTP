@@ -23,6 +23,8 @@ use std::{
 };
 use tower::ServiceExt;
 use uuid::Uuid;
+#[path = "support/public_api.rs"]
+mod public_api;
 
 async fn request(
     app: &axum::Router,
@@ -273,6 +275,7 @@ async fn authenticated_api_queue_and_dkim() {
             development: true,
             update_repository: None,
             cloudflare_api_token: None,
+            api_allowed_origins: vec![],
         }),
         dns: TokioAsyncResolver::tokio_from_system_conf().unwrap(),
         limits: Arc::new(Mutex::new(HashMap::new())),
@@ -463,6 +466,64 @@ async fn authenticated_api_queue_and_dkim() {
     let (id2, created2) = second.unwrap_or_else(|e| panic!("{}", e.2));
     assert_eq!(id1, id2);
     assert_ne!(created1, created2);
+    // Search uses literal text and retains the API key's ownership boundary.
+    let mut private_input = send_input.clone();
+    private_input.subject = "Private 100%_fixture".into();
+    let (private_id, _) = send::enqueue(&state, &Auth { api_key_id: None }, private_input, None)
+        .await
+        .unwrap();
+    for (term, credential, expected) in [
+        ("100%_", cookie.as_str(), 1),
+        ("100%_", bearer.as_str(), 0),
+        ("RECIPIENT@EXAMPLE.NET", bearer.as_str(), 1),
+        ("中文标题", bearer.as_str(), 1),
+        ("does-not-exist", cookie.as_str(), 0),
+        ("' OR TRUE --", cookie.as_str(), 0),
+    ] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("search", term)
+            .finish();
+        let (status, _, data) = request(
+            &app,
+            "GET",
+            &format!("/api/v1/emails?{query}"),
+            json!({}),
+            Some(credential),
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["data"].as_array().unwrap().len(), expected);
+    }
+    for path in [
+        "/api/v1/emails?status=unknown".to_owned(),
+        format!("/api/v1/emails?search={}", "a".repeat(201)),
+    ] {
+        assert_eq!(
+            request(&app, "GET", &path, json!({}), Some(&cookie), false)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            "/api/v1/emails?status=failed&search=fixture",
+            json!({}),
+            Some(&cookie),
+            false
+        )
+        .await
+        .2["data"],
+        json!([])
+    );
+    sqlx::query("DELETE FROM emails WHERE id=$1")
+        .bind(private_id)
+        .execute(&db)
+        .await
+        .unwrap();
     let mut different = send_input;
     different.subject = "different".into();
     assert!(
@@ -710,6 +771,10 @@ async fn authenticated_api_queue_and_dkim() {
         server.abort();
         let _ = server.await;
         assert!(status.success());
+    }
+    public_api::verify(&state, &cookie, &bearer).await;
+    if std::env::var("BUNMAIL_THIRD_PARTY_TEST").as_deref() == Ok("true") {
+        public_api::browser(&state, &bearer).await;
     }
     assert_eq!(
         request(

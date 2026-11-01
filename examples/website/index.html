@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>网站发信测试</title><link rel="stylesheet" href="/app.css"><script defer src="/app.js"></script></head>
+<body><main><header><img src="/logo.svg" alt=""><h1>网站发信测试</h1><span id="connection" role="status">检查连接中</span></header><dl><dt>发件地址</dt><dd id="from">-</dd><dt>收件地址</dt><dd id="to">-</dd></dl><form id="send-form"><label>主题<input name="subject" required maxlength="200"></label><label>正文<textarea name="text" required rows="8" maxlength="8000"></textarea></label><button type="submit" disabled>发送邮件</button></form><section id="result" hidden aria-live="polite"><h2>发送结果</h2><pre id="result-text"></pre><button id="refresh" type="button" hidden>刷新状态</button></section></main></body>
+</html>

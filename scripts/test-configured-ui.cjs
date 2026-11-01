@@ -9,6 +9,18 @@ const fs=require('node:fs');
   page.on('dialog',dialog=>dialog.accept());
   try{
     await page.goto(process.env.TEST_UI_URL);
+    await page.emulateMedia({colorScheme:'dark'});
+    await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+    await page.locator('button[data-theme-choice=light]').click();
+    assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+    await page.reload();await page.locator('#login-form').waitFor();
+    assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+    await page.locator('button[data-theme-choice=dark]').click();
+    assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
+    await page.locator('button[data-theme-choice=system]').click();
+    await page.emulateMedia({colorScheme:'light'});
+    await page.waitForFunction(()=>document.documentElement.dataset.theme==='light');
+    assert.equal(await page.locator('html').getAttribute('aria-pressed'),null);
     await page.locator('#email').fill('owner@example.test');
     await page.locator('#password').fill('correct-horse-battery-staple-123');
     await page.locator('#login-form button[type=submit]').click();
@@ -60,14 +72,52 @@ const fs=require('node:fs');
     await page.locator('#from').fill('hello@example.test');
     await page.locator('#to').fill('recipient@example.net');
     await page.locator('#subject').fill('Sender UI fixture');
+    await page.locator('[data-action=body-mode][data-mode=text]').click();
     await page.locator('#text').fill('Sender display name fixture');
+    await page.locator('[data-locale=en]').click();
+    await page.locator('#text').waitFor();
+    assert.equal(await page.locator('#text').inputValue(),'Sender display name fixture');
+    assert.equal(await page.locator('#from_name').inputValue(),'自用通知');
+    await page.locator('[data-action=body-mode][data-mode=html]').click();
+    await page.locator('#html').fill('<p>HTML draft</p>');
+    await page.locator('[data-action=body-mode][data-mode=text]').click();
+    assert.equal(await page.locator('#text').inputValue(),'Sender display name fixture');
+    await page.locator('[data-locale=zh-CN]').click();await page.locator('#text').waitFor();
+    await page.evaluate(()=>render());
+    assert.equal(await page.locator('#text').inputValue(),'Sender display name fixture');
+    assert.equal(await page.locator('#html').inputValue(),'<p>HTML draft</p>');
+    // Browser back/hash navigation must not discard the composition when the user cancels.
+    page.removeAllListeners('dialog');page.once('dialog',dialog=>dialog.dismiss());
+    await page.evaluate(()=>{location.hash='domains';});
+    await page.waitForFunction(()=>location.hash==='#send');
+    assert.equal(await page.locator('#html').inputValue(),'<p>HTML draft</p>');
+    page.on('dialog',dialog=>dialog.accept());
     assert(!(await page.locator('#send-form button[type=submit]').isDisabled()));
     await page.screenshot({path:'artifacts/sender-rdns-warning-desktop.png'});
+    await page.route('**/api/v1/emails/send',route=>route.fulfill({status:503,json:{error:{message:'Connection failed'}}}));
     await page.locator('#send-form button[type=submit]').click();
+    await page.locator('#send-form .form-error').waitFor();
+    assert.equal(await page.locator('#send-form .form-error').textContent(),'无法连接服务');
+    assert.equal(await page.locator('#text').inputValue(),'Sender display name fixture');
+    await page.screenshot({path:'artifacts/compose-inline-error-zh.png'});
+    await page.unroute('**/api/v1/emails/send');
+    await page.locator('#send-form button[type=submit]').click();
+    await page.locator('#email-search-form input').fill('Sender UI fixture');
+    await page.locator('#email-search-form button').click();
+    await page.waitForFunction(()=>document.querySelectorAll('tr[data-open]').length===1);
+    await page.screenshot({path:'artifacts/email-search-zh-desktop.png'});
     await page.locator('tr[data-open]').filter({hasText:'Sender UI fixture'}).click();
     await page.locator('#dialog[open]').waitFor();
     assert((await page.locator('#dialog').textContent()).includes('自用通知'));
     await page.locator('#dialog [data-action=close]').click();
+    await page.locator('#email-search-form input').fill('no-matching-message');
+    await page.locator('#email-search-form button').click();
+    await page.getByText('没有符合条件的邮件',{exact:true}).waitFor();
+    await page.locator('[data-action=clear-filters]').click();
+    await page.locator('tr[data-open]').first().waitFor();
+    const stableRow=await page.locator('tr[data-open]').first().elementHandle();
+    await page.evaluate(()=>render({background:true}));
+    assert(await stableRow.evaluate(row=>row.isConnected),'unchanged background refresh must preserve the rendered list');
     await page.locator('nav a[href="#domains"]').click();
     await page.locator('.domain .badge.verified').waitFor();
     await page.locator('[data-action=cloudflare]').first().click();
@@ -116,6 +166,15 @@ const fs=require('node:fs');
     await page.locator('#dialog [data-action=close]').click();
     // Render active HTML through the real form POST preview; sandbox and CSP must block it.
     await page.locator('[data-action=add-template]').click();
+    await page.locator('#name').fill('Unsaved template');
+    page.removeAllListeners('dialog');page.once('dialog',dialog=>dialog.dismiss());
+    await page.keyboard.press('Escape');
+    assert(await page.locator('#dialog').evaluate(dialog=>dialog.open));
+    assert.equal(await page.locator('#name').inputValue(),'Unsaved template');
+    page.on('dialog',dialog=>dialog.accept());
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>!document.querySelector('#dialog').open);
+    await page.locator('[data-action=add-template]').click();
     await page.locator('#html').fill('<script>window.previewUnsafe=true;parent.previewUnsafe=true</script><p style="color:rgb(10,20,30)">Safe preview</p><img src="https://tracking.invalid/pixel">');
     const blockedRequest=page.waitForEvent('requestfailed',{predicate:request=>request.url().includes('tracking.invalid'),timeout:5000});
     await page.locator('[data-action=preview-editor]').click();
@@ -125,7 +184,44 @@ const fs=require('node:fs');
     assert.equal(await preview.locator('body').evaluate(()=>window.previewUnsafe),undefined);
     assert.equal(await page.evaluate(()=>window.previewUnsafe),undefined);
     assert.match((await blockedRequest).failure().errorText,/^(csp|net::ERR_BLOCKED_BY_CSP)$/i);
+    await page.locator('#dialog [data-action=close]').click();
+    // A failed list request has a working recovery action.
+    await page.route('**/api/v1/emails?*',route=>route.fulfill({status:503,json:{error:{message:'Connection failed'}}}));
+    await page.locator('nav a[href="#emails"]').click();
+    await page.locator('.refresh-error').waitFor();
+    await page.unroute('**/api/v1/emails?*');
+    await page.locator('.refresh-error [data-action=refresh]').click();
+    await page.locator('tr[data-open]').first().waitFor();
+    // Expired required checks are distinguished from missing PTR.
+    await page.route('**/api/v1/domains',async route=>{const response=await route.fetch();const data=await response.json();data.data[0].domain.verified=false;data.data[0].domain.checked_at=new Date(Date.now()-25*3600000).toISOString();await route.fulfill({response,json:data});});
+    await page.locator('nav a[href="#domains"]').click();
+    await page.getByText('验证已过期',{exact:true}).waitFor();
+    await page.screenshot({path:'artifacts/domain-expired-zh-desktop.png'});
+    await page.unroute('**/api/v1/domains');
+    for(const locale of ['en','zh-CN']){
+      await page.locator(`[data-locale=${locale}]`).click();await page.waitForFunction(()=>!document.querySelector('.loading')&&document.querySelector('#content')?.getAttribute('aria-busy')!=='true');
+      for(const viewport of [{width:1440,height:1000},{width:390,height:844},{width:320,height:740}]){
+        await page.setViewportSize(viewport);
+        for(const section of ['dashboard','send','emails','domains','templates','keys','settings']){
+          await page.evaluate(section=>{location.hash=section;},section);
+          await page.waitForFunction(section=>document.querySelector('nav a[aria-current=page]')?.getAttribute('href')==='#'+section&&!document.querySelector('.loading')&&document.querySelector('#content')?.getAttribute('aria-busy')!=='true',section);
+          assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${locale} ${section} overflows ${viewport.width}`);
+          if(viewport.width<=390)assert(await page.locator('.mobile-menu').evaluate(el=>{const a=el.getBoundingClientRect(),b=el.closest('.topbar').getBoundingClientRect();return a.top>=b.top&&a.bottom<=b.bottom;}),'mobile navigation must fit inside the top bar');
+          if(viewport.width<=390&&section==='emails')assert(await page.locator('.mail-table').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'mobile mail list must not clip status/actions');
+          await page.screenshot({path:`artifacts/ui-${section}-${locale}-${viewport.width}.png`});
+        }
+      }
+      await page.setViewportSize({width:1440,height:1000});
+    }
+    // Authentication loss closes privileged modals and cannot be overwritten by stale rendering.
+    await page.locator('nav a[href="#templates"]').click();await page.locator('[data-action=add-template]').click();
+    await page.route('**/api/v1/config',route=>route.fulfill({status:401,json:{error:{message:'Please sign in or provide a valid API key'}}}));
+    await page.evaluate(()=>render());
+    await page.locator('#login-form').waitFor();
+    assert(!(await page.locator('#dialog').evaluate(dialog=>dialog.open)));
+    assert((await page.locator('#login-error').textContent()).includes('登录已过期'));
+    await page.unroute('**/api/v1/config');
     assert.deepEqual(errors,[]);
-    console.log('PASS: configured UI exposes test, real API enqueues English test, preview renders styles and blocks scripts/network (isolated DNS fixture; no public delivery)');
+    console.log('PASS: delivery switch, search, draft/locale preservation, error recovery, session expiry, seven views in both languages at 1440/390/320px, sandboxed previews (isolated fixtures; no public delivery)');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

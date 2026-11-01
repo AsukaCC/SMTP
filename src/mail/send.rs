@@ -175,15 +175,19 @@ pub async fn enqueue(
         .await?
     {
         if existing_hash != request_hash {
-            return Err(AppError::conflict(
-                "Idempotency-Key was used with a different request",
+            return Err(AppError(
+                StatusCode::CONFLICT,
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency-Key was used with a different request".into(),
             ));
         }
         return Ok((id, false));
     }
     if !state.delivery_enabled().await? {
-        return Err(AppError::conflict(
-            "Delivery is paused. Enable delivery in Settings",
+        return Err(AppError(
+            StatusCode::CONFLICT,
+            "DELIVERY_PAUSED",
+            "Delivery is paused. Enable delivery in Settings".into(),
         ));
     }
     if !state.rate_limit(format!("send:{scope}"), 60, 60) {
@@ -199,8 +203,10 @@ pub async fn enqueue(
         .await?
         .filter(Domain::can_send)
         .ok_or_else(|| {
-            AppError::invalid(
-                "Verify the sender domain DNS within the last 24 hours before sending",
+            AppError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "DOMAIN_NOT_VERIFIED",
+                "Verify the sender domain DNS within the last 24 hours before sending".into(),
             )
         })?;
     if let Some(id) = input.template_id {
@@ -237,8 +243,10 @@ pub async fn enqueue(
         .fetch_one(&state.db)
         .await?;
         if hash != request_hash {
-            return Err(AppError::conflict(
-                "Idempotency-Key was used with a different request",
+            return Err(AppError(
+                StatusCode::CONFLICT,
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency-Key was used with a different request".into(),
             ));
         }
         return Ok((id, false));

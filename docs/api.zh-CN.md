@@ -2,6 +2,8 @@
 
 基础路径为 `/api/v1`。后台登录创建会话 Cookie；管理写入需要与 `APP_URL` 一致的 `Origin`。发信 API 使用 `Authorization: Bearer <API_KEY>`，密钥仅创建时显示一次，不可读取管理数据。
 
+第三方网站的服务端示例、可选 CORS、幂等重试规则与自动测试见 [第三方网站接入](integration.zh-CN.md)。公开 API 的 OpenAPI 3.1 文件位于 `GET /api/v1/openapi.json`，可直接导入客户端；`GET /api/v1/auth/check` 可验证凭据而不发送邮件。所有 API 响应包含服务器生成的 `X-Request-ID`。
+
 ## 发信
 
 ```http
@@ -77,12 +79,14 @@ Idempotency-Key: delivery-test-001
 | `/templates/{id}` | PUT 更新、DELETE 删除 |
 | `/api-keys` | GET 列表、POST 创建 `{name}` |
 | `/api-keys/{id}` | DELETE 撤销 |
-| `/emails?page=0&status=queued` | GET 记录，页码从 0 起 |
+| `/emails?page=0&status=queued&search=hello` | GET 记录，页码从 0 起，每页 50 条；状态与搜索可选 |
 | `/emails/{id}` | GET 邮件及投递尝试详情 |
 | `/emails/{id}/retry` | POST 重试失败邮件 |
 | `/emails/{id}/cancel` | POST 取消尚未发送的队列邮件 |
 
-`GET /health` 无需登录，仅返回服务版本及数据库健康状态。常规错误格式为 `{"error":{"code":"…","message":"…"}}`，框架级 JSON 或路径解析错误可能为文本。
+`GET /health` 无需登录，仅返回服务版本及数据库健康状态。错误格式统一为 `{"error":{"code":"…","message":"…"}}`，包含框架级 JSON、UUID、查询参数、体积和方法错误；管理用 HTML 预览端点保持隔离的 HTML 错误页面。429 包含 `Retry-After`；401 包含 Bearer 认证挑战。发信端点区分 `DELIVERY_PAUSED`、`DOMAIN_NOT_VERIFIED`、`IDEMPOTENCY_CONFLICT`，客户端应按错误码处理，不依赖英文消息文本。
+
+邮件列表和单封详情也允许发信 API 密钥读取，但仅返回该密钥提交的记录。`search` 对主题、完整发件人、收件人做不区分大小写的字面子串搜索，最多 200 个字符；`%`、`_` 不作为通配符。支持与 `status` 同时筛选，状态仅限 `queued`、`sending`、`sent`、`failed`、`cancelled`。列表按创建时间和 ID 倒序稳定分页，返回 `has_more` 与当前 `page`。
 
 Cloudflare 凭据仅配置在服务器 `.env`，不会由 API 返回。`GET /config` 的 `cloudflare_configured` 只表示是否配置 Token，不代表权限已验证。预览返回 `records`、`fingerprint` 和 `can_apply`；记录状态为 `create`、`unchanged`、`conflict`、`unavailable`。应用变更时重新读取 Cloudflare 并校验 fingerprint，冲突或过期预览返回 `409`。执行结果返回 `complete` 和各记录的 `created`、`unchanged`、`failed`、`skipped`；部分失败也可能返回 `200`，必须检查 `complete`。应用后清除该域名的旧验证状态，需等 DNS 生效后重新检查。
 

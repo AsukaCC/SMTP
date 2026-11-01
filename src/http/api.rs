@@ -335,6 +335,7 @@ pub async fn delete_template(
 #[derive(Deserialize, Default)]
 pub struct EmailQuery {
     status: Option<String>,
+    search: Option<String>,
     #[serde(default)]
     page: u32,
 }
@@ -346,8 +347,20 @@ pub async fn list_emails(
     if query.page > 10000 {
         return Err(AppError::invalid("Page is too large"));
     }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'from_address',from_address,'to_address',to_address,'subject',subject,'status',status,'attempts',attempts,'created_at',created_at,'sent_at',sent_at,'last_error',last_error,'next_attempt_at',next_attempt_at) FROM emails WHERE ($1::uuid IS NULL OR api_key_id=$1) AND ($2::text IS NULL OR status=$2) ORDER BY created_at DESC LIMIT 51 OFFSET $3")
-        .bind(auth.api_key_id).bind(query.status).bind(i64::from(query.page)*50).fetch_all(&state.db).await?;
+    if query.status.as_deref().is_some_and(|status| {
+        !matches!(
+            status,
+            "queued" | "sending" | "sent" | "failed" | "cancelled"
+        )
+    }) {
+        return Err(AppError::invalid("Invalid email status"));
+    }
+    let search = query.search.as_deref().unwrap_or("").trim();
+    if search.chars().count() > 200 {
+        return Err(AppError::invalid("Search must be at most 200 characters"));
+    }
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'from_address',from_address,'to_address',to_address,'subject',subject,'status',status,'attempts',attempts,'created_at',created_at,'sent_at',sent_at,'last_error',last_error,'next_attempt_at',next_attempt_at) FROM emails WHERE ($1::uuid IS NULL OR api_key_id=$1) AND ($2::text IS NULL OR status=$2) AND ($4='' OR strpos(lower(subject || ' ' || from_address || ' ' || to_address),lower($4))>0) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET $3")
+        .bind(auth.api_key_id).bind(query.status).bind(i64::from(query.page)*50).bind(search).fetch_all(&state.db).await?;
     let has_more = rows.len() > 50;
     Ok(Json(
         json!({"data":rows.into_iter().take(50).collect::<Vec<_>>(),"has_more":has_more,"page":query.page}),

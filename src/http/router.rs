@@ -9,31 +9,44 @@ use axum::{
     routing::{get, post},
 };
 
+const INDEX_HTML: &str = include_str!("../../static/index.html");
+const APP_CSS: &str = concat!(
+    include_str!("../../static/styles/tokens.css"),
+    include_str!("../../static/styles/app.css"),
+);
+const APP_JS: &str = concat!(
+    include_str!("../../static/scripts/i18n.js"),
+    include_str!("../../static/scripts/app.js"),
+);
+
 async fn index() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+    Html(INDEX_HTML)
 }
 async fn css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../static/app.css"),
-    )
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS)
 }
 async fn js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../static/app.js"),
+        APP_JS,
+    )
+}
+async fn theme_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../../static/scripts/theme.js"),
     )
 }
 async fn lucide() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../static/vendor/lucide.min.js"),
+        include_str!("../../static/vendor/lucide.min.js"),
     )
 }
 async fn logo() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/svg+xml")],
-        include_str!("../static/logo.svg"),
+        include_str!("../../static/logo.svg"),
     )
 }
 async fn security(request: Request<Body>, next: Next) -> Response {
@@ -59,18 +72,31 @@ async fn security(request: Request<Body>, next: Next) -> Response {
 }
 
 pub fn router(state: AppState) -> Router {
+    let public_api = Router::new()
+        .route("/api/v1/auth/check", get(crate::http_api::check_auth))
+        .route("/api/v1/emails", get(api::list_emails))
+        .route("/api/v1/emails/send", post(send::send))
+        .route("/api/v1/emails/{id}", get(api::email_detail))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::http_api::browser_auth,
+        ))
+        .layer(crate::http_api::cors(&state));
     Router::new()
+        .merge(public_api)
         .route("/", get(index))
         .route("/dashboard", get(index))
         .route("/dashboard/login", get(index))
         .route("/assets/app.css", get(css))
         .route("/assets/app.js", get(js))
+        .route("/assets/theme.js", get(theme_js))
         .route("/assets/lucide.js", get(lucide))
         .route("/assets/logo.svg", get(logo))
         .route("/health", get(api::health))
         .route("/api/v1/login", post(auth::login))
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
+        .route("/api/v1/openapi.json", get(crate::http_api::openapi))
         .route("/api/v1/config", get(api::config))
         .route(
             "/api/v1/config/delivery",
@@ -114,10 +140,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/templates/{id}",
             axum::routing::put(api::update_template).delete(api::delete_template),
         )
-        .route("/api/v1/emails", get(api::list_emails))
-        .route("/api/v1/emails/send", post(send::send))
         .route("/api/v1/emails/test", post(send::test_send))
-        .route("/api/v1/emails/{id}", get(api::email_detail))
         .route("/api/v1/emails/{id}/retry", post(api::retry_email))
         .route("/api/v1/emails/{id}/cancel", post(api::cancel_email))
         .fallback(|| async {
@@ -129,6 +152,7 @@ pub fn router(state: AppState) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(crate::http_api::contract))
         .layer(middleware::from_fn(security))
         .with_state(state)
 }

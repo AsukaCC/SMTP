@@ -28,6 +28,7 @@ environment = {
     'MAIL_HOSTNAME': 'mail.bunmail.test' if args.development else 'mail.your-domain.com',
     'PUBLIC_IP': '',
     'DELIVERY_ENABLED': 'false',
+    'API_ALLOWED_ORIGINS': '',
     'SMTP_BIND': '',
     'SMTP_TLS_CERT': '',
     'SMTP_TLS_KEY': '',

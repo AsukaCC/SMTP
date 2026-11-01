@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 简体中文默认界面，支持英文切换并记住偏好。
+- 简体中文默认界面，支持英文切换并记住偏好。外观默认跟随系统，也可固定为浅色或深色。
 - 单管理员登录；独立 API 密钥生成、撤销，密钥只允许发信。
 - 发信域名、RSA 2048 DKIM 密钥、SPF / DKIM / DMARC / PTR / A 或 AAAA 检查。
 - rDNS 为可选告警，缺失时仍可发信；支持发件人显示名称，支持 Cloudflare DNS 预览及创建缺失记录。
@@ -36,6 +36,7 @@ docker compose up -d --build --wait
 
 - [服务器与 Docker 部署](docs/deployment.zh-CN.md)
 - [API 与 SMTP 使用](docs/api.zh-CN.md)
+- [第三方网站接入、OpenAPI 与调用测试](docs/integration.zh-CN.md)
 - [Cloudflare DNS 自动配置](docs/cloudflare.zh-CN.md)
 - [版本打包、更新及回退](docs/releases.zh-CN.md)
 - [维护约定](AGENTS.md)
@@ -49,7 +50,9 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 python3 -m unittest discover -s tests -p 'test_*.py'
-node --check static/app.js
+node --check static/scripts/theme.js
+node --check static/scripts/i18n.js
+node --check static/scripts/app.js
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
 python3 scripts/test-integration.py
 ```
