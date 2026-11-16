@@ -1,0 +1,81 @@
+name: Release
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release version
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          version = tomllib.load(open('Cargo.toml', 'rb'))['package']['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version)
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + version
+          PY
+      - name: Build Docker installation package
+        run: python3 scripts/deploy.py package "${GITHUB_REF_NAME#v}" --output artifacts/release
+      - name: Verify installation, update, rollback and backup restore
+        run: python3 scripts/test-release.py "artifacts/release/${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.architecture }}
+          path: artifacts/release/bunmail-rs-*-linux-${{ matrix.architecture }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: artifacts/release
+          merge-multiple: true
+      - name: Verify packages and create checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, tarfile
+          version = os.environ['GITHUB_REF_NAME'][1:]
+          root = pathlib.Path('artifacts/release')
+          sums, schemas = [], set()
+          for architecture in ('amd64', 'arm64'):
+              path = root / f'bunmail-rs-{version}-linux-{architecture}.tar.gz'
+              with tarfile.open(path) as archive:
+                  manifest = json.load(archive.extractfile('release.json'))
+              assert manifest['version'] == version
+              assert manifest['platform'] == f'linux/{architecture}'
+              schemas.add(manifest['schema'])
+              with path.open('rb') as stream:
+                  sums.append(f'{hashlib.file_digest(stream, "sha256").hexdigest()}  {path.name}\n')
+          assert len(schemas) == 1
+          (root / 'SHA256SUMS').write_text(''.join(sums))
+          PY
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/release/* \
+            --verify-tag --title "BunMail RS $GITHUB_REF_NAME" \
+            --notes-file "docs/release-notes/${GITHUB_REF_NAME#v}.zh-CN.md" --latest

@@ -114,6 +114,12 @@ class DeployTests(unittest.TestCase):
                 self.app.change('update', self.root)
         self.assertEqual(self.app.events, [])
 
+    def test_resume_rejects_incompatible_pending_before_stopping(self):
+        self.state['pending']['target']['schema'] = 'c' * 64
+        with self.assertRaisesRegex(ValueError, '数据库迁移指纹变化'):
+            self.app.resume(self.state)
+        self.assertEqual(self.app.events, [])
+
 
 if __name__ == '__main__':
     unittest.main()

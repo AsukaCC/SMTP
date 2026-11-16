@@ -104,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/updates", get(crate::updates::status))
         .route("/api/v1/updates/check", post(crate::updates::check))
+        .route("/api/v1/updates/install", post(crate::updates::install))
         .route("/api/v1/stats", get(api::stats))
         .route(
             "/api/v1/domains",

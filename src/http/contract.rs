@@ -59,7 +59,10 @@ pub async fn browser_auth(State(state): State<AppState>, request: Request, next:
 }
 
 pub async fn check_auth(auth: Auth) -> Json<serde_json::Value> {
-    Json(json!({"authenticated":true,"scope":if auth.api_key_id.is_some(){"send"}else{"admin"}}))
+    Json(json!({"authenticated":true,"scope":match auth.role {
+        crate::auth::Role::Key => "send",
+        crate::auth::Role::Admin => "admin",
+    }}))
 }
 
 pub async fn openapi() -> impl IntoResponse {

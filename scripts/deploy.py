@@ -13,9 +13,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import tomllib
 
-FILES = ('compose.yml', 'compose.smtp.yml', 'deploy.py', 'setup.py', 'reset-password.py', '.env.example', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
+FILES = ('compose.yml', 'compose.smtp.yml', 'deploy.py', 'updater.py', 'setup.py', '.env.example', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
@@ -58,7 +59,7 @@ def package(number, output):
     info = json.loads(run('docker', 'image', 'inspect', image, capture_output=True, text=True).stdout)[0]
     with tempfile.TemporaryDirectory(prefix='.package-', dir=output) as temporary:
         directory = Path(temporary)
-        sources = ('docker-compose.yml', 'docker-compose.smtp.yml', 'scripts/deploy.py', 'scripts/setup.py', 'scripts/reset-password.py', '.env.example', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
+        sources = ('docker-compose.yml', 'docker-compose.smtp.yml', 'scripts/deploy.py', 'scripts/updater.py', 'scripts/setup.py', '.env.example', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
         for name, source in zip(FILES, sources):
             shutil.copy2(root / source, directory / name)
         with gzip.open(directory / 'image.tar.gz', 'wb') as stream:
@@ -73,7 +74,12 @@ def package(number, output):
         manifest = {'format': 1, 'version': number, 'schema': schema, 'image': info['Id'], 'platform': f"{info['Os']}/{info['Architecture']}", 'files': {name: digest(directory / name) for name in (*FILES, 'image.tar.gz')}}
         write_json(directory / 'release.json', manifest)
         os.rename(directory, destination)
+    archive = output / f"bunmail-rs-{number}-{info['Os']}-{info['Architecture']}.tar.gz"
+    with tarfile.open(archive, 'x:gz') as stream:
+        for name in (*FILES, 'image.tar.gz', 'release.json'):
+            stream.add(destination / name, arcname=name, recursive=False)
     print(f'安装包已生成：{destination}')
+    print(f'GitHub Release 构建包：{archive}')
 
 def read_package(directory):
     data = json.loads((directory / 'release.json').read_text())
@@ -88,12 +94,13 @@ def read_package(directory):
     return data
 
 class Deployment:
-    def __init__(self, directory, timeout=180):
+    def __init__(self, directory, timeout=180, progress=None):
         self.root = directory.resolve()
         self.meta = self.root / '.bunmail'
         self.meta.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.project = 'bunmail-' + hashlib.sha256(str(self.root).encode()).hexdigest()[:12]
         self.timeout = timeout
+        self.progress = progress or (lambda stage: None)
 
     @contextmanager
     def lock(self):
@@ -119,6 +126,8 @@ class Deployment:
         command = ['docker', 'compose', '--project-name', self.project, '--project-directory', str(self.root), '--env-file', str(self.root / '.env'), '-f', str(directory / 'compose.yml'), '-f', str(directory / 'image.json')]
         if (self.root / '.smtp-enabled').exists():
             command += ['-f', str(directory / 'compose.smtp.yml')]
+        if (self.root / '.web-updates-enabled').exists():
+            command += ['-f', str(self.meta / 'updater' / 'compose.json')]
         return run(*command, *arguments, **kwargs)
 
     def prepare(self, source):
@@ -128,6 +137,8 @@ class Deployment:
             run('docker', 'load', '-i', str(source / 'image.tar.gz'), stdout=subprocess.DEVNULL)
             inspect = run('docker', 'image', 'inspect', release['image'], capture_output=True, text=True)
         info = json.loads(inspect.stdout)[0]
+        if f"{info['Os']}/{info['Architecture']}" != release['platform']:
+            raise ValueError('镜像与构建包平台不匹配')
         labels = info['Config'].get('Labels') or {}
         if labels.get('io.bunmail.schema') != release['schema'] or labels.get('org.opencontainers.image.version') != release['version']:
             raise ValueError('镜像版本或数据库指纹不匹配')
@@ -183,6 +194,8 @@ class Deployment:
         if not pending:
             raise ValueError('没有待恢复的操作')
         target, original = pending['target'], pending.get('original')
+        if original and target['schema'] != original['schema']:
+            raise ValueError('数据库迁移指纹变化，禁止自动更新/回退')
         for release in (target, original):
             if release:
                 run('docker', 'image', 'inspect', release['image'], stdout=subprocess.DEVNULL)
@@ -190,12 +203,15 @@ class Deployment:
             if original:
                 self.compose(original, 'stop', 'app')
             if original and not pending.get('backup'):
+                self.progress('backing_up')
                 pending['backup'] = self.backup(original)
                 self.save(state)
+            self.progress('installing')
             self.start(target, install=original is None)
         except (subprocess.CalledProcessError, OSError):
             if original:
                 try:
+                    self.progress('rolling_back')
                     self.start(original)
                 except (subprocess.CalledProcessError, OSError):
                     raise ValueError('新旧版本启动均失败，保留 pending 和备份；排查后运行 resume') from None

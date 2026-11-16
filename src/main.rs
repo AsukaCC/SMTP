@@ -22,8 +22,11 @@ fn healthcheck() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().any(|a| a == "--healthcheck") {
-        return healthcheck();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    match args.as_slice() {
+        [] => {}
+        [arg] if arg == "--healthcheck" => return healthcheck(),
+        _ => anyhow::bail!("Unsupported arguments; only --healthcheck is available"),
     }
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -50,14 +53,6 @@ async fn main() -> Result<()> {
         limits: Arc::new(Mutex::new(HashMap::new())),
     };
     auth::bootstrap(&state).await?;
-    if std::env::args().any(|a| a == "--reset-password") {
-        let mut password = String::new();
-        std::io::stdin().take(258).read_to_string(&mut password)?;
-        auth::reset_password(&state, password.trim_end_matches(['\r', '\n']).to_owned()).await?;
-        println!("Password reset; all browser sessions revoked");
-        state.db.close().await;
-        return Ok(());
-    }
     config.bootstrap_password = None;
     state.config = Arc::new(config);
     for domain in sqlx::query_as::<_, Domain>("SELECT * FROM domains")

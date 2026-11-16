@@ -9,6 +9,25 @@ const fs=require('node:fs');
   page.on('dialog',dialog=>dialog.accept());
   try{
     await page.goto(process.env.TEST_UI_URL);
+    fs.mkdirSync('artifacts',{recursive:true});
+    for(const theme of ['light','dark']) {
+      await page.locator(`button[data-theme-choice=${theme}]`).click();
+      for(const locale of ['zh-CN','en']) {
+        await page.locator(`[data-locale=${locale}]`).click();
+        await page.locator(`#login-form ~ .prefs [data-locale=${locale}].selected`).waitFor();
+        assert.equal(await page.locator('[data-action=login-mode], #register-form, #verify-form, #forgot-form, #reset-form, .auth-links').count(),0);
+        await page.setViewportSize({width:390,height:844});
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+        await page.screenshot({path:`artifacts/glass-login-${theme}-${locale}.png`});
+      }
+    }
+    await page.goto(process.env.TEST_UI_URL+'/dashboard/login?reset='+'a'.repeat(64));
+    await page.locator('#login-form').waitFor();
+    assert.equal(await page.locator('#reset-form, #forgot-form').count(),0);
+    await page.locator('[data-locale=zh-CN]').click();
+    await page.locator('[data-locale=zh-CN].selected').waitFor();
+    await page.locator('button[data-theme-choice=system]').click();
+    await page.setViewportSize({width:1440,height:1000});
     await page.emulateMedia({colorScheme:'dark'});
     await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
     await page.locator('button[data-theme-choice=light]').click();
@@ -26,6 +45,36 @@ const fs=require('node:fs');
     await page.locator('#login-form button[type=submit]').click();
     await page.locator('nav a[href="#settings"]').click();
     await page.getByRole('heading',{name:'服务设置',exact:true}).waitFor();
+    assert.equal(await page.locator('[data-action=toggle-registration]').count(),0);
+    const packageFixture={name:'bunmail-rs-0.1.1-linux-amd64.tar.gz',platform:'linux/amd64',size:123456};
+    let updateFixture={current_version:'0.1.0',repository:'AsukaCC/SMTP',releases_url:'https://github.com/AsukaCC/SMTP/releases',status:'update_available',retry_after_seconds:0,check:{latest_version:'0.1.1',checked_at:new Date().toISOString()},installer:{status:'ready',repository:'AsukaCC/SMTP',platform:'linux/amd64',current_version:'0.1.0',job:null},can_install:true,package:packageFixture};
+    let updateCalls=0;
+    await page.route('**/api/v1/updates',route=>route.fulfill({json:updateFixture}));
+    await page.route('**/api/v1/updates/install',route=>{
+      const body=route.request().postDataJSON();assert.equal(body.version,'0.1.1');assert.match(body.request_id,/^[0-9a-f-]{36}$/);
+      updateCalls++;updateFixture={...updateFixture,can_install:false,installer:{...updateFixture.installer,job:{...body,status:'downloading',error:null,updated_at:new Date().toISOString()}}};
+      return route.fulfill({status:202,json:updateFixture.installer.job});
+    });
+    await page.evaluate(()=>render());await page.locator('[data-action=install-update]').click();
+    await page.getByText('0.1.1 · 正在下载构建包',{exact:true}).waitFor();
+    assert.equal(updateCalls,1);assert(await page.locator('[data-action=install-update]').isDisabled());
+    for(const locale of ['zh-CN','en']){
+      await page.locator(`[data-locale=${locale}]`).click();
+      for(const width of [1440,390,320]){
+        await page.setViewportSize({width,height:844});
+        await page.locator('.version-section').scrollIntoViewIfNeeded();
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+        await page.screenshot({path:`artifacts/update-progress-${locale}-${width}.png`});
+      }
+      await page.setViewportSize({width:1440,height:1000});
+    }
+    updateFixture.installer.job.status='rolled_back';updateFixture.installer.job.error='update_failed';
+    await page.evaluate(()=>pollUpdateStatus());await page.getByText(/previous version restored/).waitFor();
+    updateFixture.installer.job=null;updateFixture.package=null;
+    await page.evaluate(()=>pollUpdateStatus());assert(await page.locator('[data-action=install-update]').isDisabled());
+    await page.getByText('No compatible build package',{exact:true}).waitFor();
+    await page.unroute('**/api/v1/updates');await page.unroute('**/api/v1/updates/install');
+    await page.locator('[data-locale=zh-CN]').click();await page.locator('[data-action=toggle-delivery]').waitFor();
     const delivery=page.locator('[data-action=toggle-delivery]');
     await delivery.waitFor();
     assert.equal(await delivery.getAttribute('aria-checked'),'false');
@@ -36,6 +85,7 @@ const fs=require('node:fs');
     assert.equal(await delivery.getAttribute('aria-checked'),'true');
     assert((await page.locator('.topbar').textContent()).includes('投递已启用'));
     await page.reload();await page.locator('[data-action=test-email]').waitFor();
+    assert.equal(new URL(page.url()).hash,'#settings','refresh preserves the current management page');
     assert.equal(await delivery.getAttribute('aria-checked'),'true');
     assert((await page.locator('#content .notice.warning').textContent()).includes('仍可发送'));
     fs.mkdirSync('artifacts',{recursive:true});
@@ -198,7 +248,9 @@ const fs=require('node:fs');
     await page.getByText('验证已过期',{exact:true}).waitFor();
     await page.screenshot({path:'artifacts/domain-expired-zh-desktop.png'});
     await page.unroute('**/api/v1/domains');
-    for(const locale of ['en','zh-CN']){
+    for(const theme of ['dark','light']){
+      await page.locator(`button[data-theme-choice=${theme}]`).click();
+      for(const locale of ['en','zh-CN']){
       await page.locator(`[data-locale=${locale}]`).click();await page.waitForFunction(()=>!document.querySelector('.loading')&&document.querySelector('#content')?.getAttribute('aria-busy')!=='true');
       for(const viewport of [{width:1440,height:1000},{width:390,height:844},{width:320,height:740}]){
         await page.setViewportSize(viewport);
@@ -208,11 +260,25 @@ const fs=require('node:fs');
           assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${locale} ${section} overflows ${viewport.width}`);
           if(viewport.width<=390)assert(await page.locator('.mobile-menu').evaluate(el=>{const a=el.getBoundingClientRect(),b=el.closest('.topbar').getBoundingClientRect();return a.top>=b.top&&a.bottom<=b.bottom;}),'mobile navigation must fit inside the top bar');
           if(viewport.width<=390&&section==='emails')assert(await page.locator('.mail-table').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'mobile mail list must not clip status/actions');
-          await page.screenshot({path:`artifacts/ui-${section}-${locale}-${viewport.width}.png`});
+          await page.screenshot({path:`artifacts/ui-${section}-${locale}-${viewport.width}-${theme}.png`});
         }
       }
       await page.setViewportSize({width:1440,height:1000});
+      }
     }
+    await page.setViewportSize({width:390,height:844});
+    await page.locator('.mobile-menu').click();
+    await page.locator('.sidebar.open').waitFor();
+    assert(await page.locator('.sidebar').evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;}));
+    await page.screenshot({path:'artifacts/glass-navigation-mobile.png'});
+    await page.locator('nav a[href="#dashboard"]').click();
+    await page.waitForFunction(()=>!document.querySelector('.sidebar.open'));
+    await page.emulateMedia({reducedMotion:'reduce'});
+    assert.equal(await page.locator('.mobile-menu').evaluate(el=>getComputedStyle(el).transitionDuration),'0s');
+    await page.emulateMedia({reducedMotion:'no-preference',contrast:'more'});
+    assert.equal(await page.locator('.topbar').evaluate(el=>getComputedStyle(el).backdropFilter),'none');
+    await page.emulateMedia({contrast:'no-preference'});
+    await page.setViewportSize({width:1440,height:1000});
     // Authentication loss closes privileged modals and cannot be overwritten by stale rendering.
     await page.locator('nav a[href="#templates"]').click();await page.locator('[data-action=add-template]').click();
     await page.route('**/api/v1/config',route=>route.fulfill({status:401,json:{error:{message:'Please sign in or provide a valid API key'}}}));
@@ -222,6 +288,6 @@ const fs=require('node:fs');
     assert((await page.locator('#login-error').textContent()).includes('登录已过期'));
     await page.unroute('**/api/v1/config');
     assert.deepEqual(errors,[]);
-    console.log('PASS: delivery switch, search, draft/locale preservation, error recovery, session expiry, seven views in both languages at 1440/390/320px, sandboxed previews (isolated fixtures; no public delivery)');
+    console.log('PASS: delivery switch, search, draft/locale preservation, error recovery, session expiry, seven views in both themes/languages at 1440/390/320px, mobile drawer, reduced motion/contrast fallback, sandboxed previews (isolated fixtures; no public delivery)');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

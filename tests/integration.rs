@@ -26,6 +26,28 @@ use uuid::Uuid;
 #[path = "support/public_api.rs"]
 mod public_api;
 
+#[test]
+fn removed_password_command_is_rejected_before_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--reset-password"],
+        vec!["--reset-password", "--healthcheck"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_bunmail-rs"))
+            .args(args)
+            .env_clear()
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("Unsupported arguments")
+        );
+    }
+}
+
 async fn request(
     app: &axum::Router,
     method: &str,
@@ -157,9 +179,18 @@ async fn verify_delivery_switch(state: &AppState, cookie: &str, bearer: &str, in
         .2["ready_to_test"],
         true
     );
-    let (id, _) = send::enqueue(&fixture, &Auth { api_key_id: None }, input.clone(), None)
-        .await
-        .unwrap();
+    let (id, _) = send::enqueue(
+        &fixture,
+        &Auth {
+            api_key_id: None,
+            account_id: None,
+            role: bunmail_rs::auth::Role::Admin,
+        },
+        input.clone(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         request(
             &app,
@@ -175,9 +206,18 @@ async fn verify_delivery_switch(state: &AppState, cookie: &str, bearer: &str, in
     );
     assert!(!state.delivery_enabled().await.unwrap());
     assert!(
-        send::enqueue(state, &Auth { api_key_id: None }, input.clone(), None)
-            .await
-            .is_err()
+        send::enqueue(
+            state,
+            &Auth {
+                api_key_id: None,
+                account_id: None,
+                role: bunmail_rs::auth::Role::Admin,
+            },
+            input.clone(),
+            None,
+        )
+        .await
+        .is_err()
     );
     assert!(queue::claim(state).await.unwrap().is_none());
     let status: String = sqlx::query_scalar("SELECT status FROM emails WHERE id=$1")
@@ -254,6 +294,7 @@ async fn authenticated_api_queue_and_dkim() {
         .connect(db_url.as_str())
         .await
         .unwrap();
+    verify_single_admin_migration(&db).await;
     sqlx::migrate!("./migrations").run(&db).await.unwrap();
     let state = AppState {
         cloudflare_lock: Default::default(),
@@ -274,6 +315,7 @@ async fn authenticated_api_queue_and_dkim() {
             smtp_key: None,
             development: true,
             update_repository: None,
+            update_socket: None,
             cloudflare_api_token: None,
             api_allowed_origins: vec![],
         }),
@@ -412,6 +454,8 @@ async fn authenticated_api_queue_and_dkim() {
     let key_id = Uuid::parse_str(key["id"].as_str().unwrap()).unwrap();
     let identity = Auth {
         api_key_id: Some(key_id),
+        account_id: None,
+        role: bunmail_rs::auth::Role::Key,
     };
     assert!(
         send::enqueue(&state, &identity, send_input.clone(), None)
@@ -469,9 +513,18 @@ async fn authenticated_api_queue_and_dkim() {
     // Search uses literal text and retains the API key's ownership boundary.
     let mut private_input = send_input.clone();
     private_input.subject = "Private 100%_fixture".into();
-    let (private_id, _) = send::enqueue(&state, &Auth { api_key_id: None }, private_input, None)
-        .await
-        .unwrap();
+    let (private_id, _) = send::enqueue(
+        &state,
+        &Auth {
+            api_key_id: None,
+            account_id: None,
+            role: bunmail_rs::auth::Role::Admin,
+        },
+        private_input,
+        None,
+    )
+    .await
+    .unwrap();
     for (term, credential, expected) in [
         ("100%_", cookie.as_str(), 1),
         ("100%_", bearer.as_str(), 0),
@@ -790,32 +843,7 @@ async fn authenticated_api_queue_and_dkim() {
         StatusCode::OK
     );
     assert!(auth::api_key(&state, token).await.is_err());
-    auth::reset_password(&state, "replacement-password-for-test".into())
-        .await
-        .unwrap();
-    assert_eq!(
-        request(&app, "GET", "/api/v1/me", json!({}), Some(&cookie), false)
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (status, new_headers, _) = request(
-        &app,
-        "POST",
-        "/api/v1/login",
-        json!({"email":"owner@example.test","password":"replacement-password-for-test"}),
-        None,
-        true,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let cookie = new_headers["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
+    verify_single_admin(&app, &state, &cookie).await;
     assert_eq!(
         request(
             &app,
@@ -930,6 +958,27 @@ async fn verify_without_ptr(state: &AppState, cookie: &str, domain: &Domain) {
 
 async fn verify_update_access(state: &AppState, cookie: &str, bearer: &str) {
     let app = web::router(state.clone());
+    let install_body = json!({"version":"0.1.1","request_id":Uuid::new_v4()});
+    for (credential, origin, expected) in [
+        (None, true, StatusCode::UNAUTHORIZED),
+        (Some(bearer), true, StatusCode::FORBIDDEN),
+        (Some(cookie), false, StatusCode::FORBIDDEN),
+        (Some(cookie), true, StatusCode::CONFLICT),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/v1/updates/install",
+                install_body.clone(),
+                credential,
+                origin
+            )
+            .await
+            .0,
+            expected
+        );
+    }
     for (method, path) in [
         ("GET", "/api/v1/updates"),
         ("POST", "/api/v1/updates/check"),
@@ -983,6 +1032,7 @@ async fn verify_update_access(state: &AppState, cookie: &str, bearer: &str) {
             checked_at: chrono::Utc::now(),
             latest_version: None,
             release_url: None,
+            packages: vec![],
         });
         let (_, _, first) = request(
             &app,
@@ -1006,6 +1056,116 @@ async fn verify_update_access(state: &AppState, cookie: &str, bearer: &str) {
         assert_eq!(first["check"], cached["check"]);
         assert!(cached["retry_after_seconds"].as_i64().unwrap() > 0);
     }
+    let old_check = chrono::Utc::now() - chrono::Duration::hours(7);
+    fixture.updates.lock().await.as_mut().unwrap().checked_at = old_check;
+    let (_, _, data) = request(
+        &app,
+        "GET",
+        "/api/v1/updates",
+        json!({}),
+        Some(cookie),
+        false,
+    )
+    .await;
+    assert_eq!(data["status"], "check_failed");
+    assert_eq!(data["retry_after_seconds"], 0);
+    assert_eq!(
+        fixture.updates.lock().await.as_ref().unwrap().checked_at,
+        old_check
+    );
+    verify_update_installer_socket(&fixture, cookie).await;
+}
+
+async fn verify_update_installer_socket(state: &AppState, cookie: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // A real Unix HTTP socket exercises the bridge without invoking Docker.
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let request_id = Uuid::new_v4();
+    let job = json!({"request_id":request_id,"version":"0.1.1","status":"queued","error":null,"updated_at":chrono::Utc::now()});
+    let job_response = job.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 2048];
+            let (header_end, length) = loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                    let length: usize = header
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            while bytes.len() < header_end + length {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let (status, body) = if bytes.starts_with(b"POST /install ") {
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                assert_eq!(body["request_id"], request_id.to_string());
+                assert_eq!(body["repository"], "AsukaCC/SMTP");
+                assert_eq!(body["version"], "0.1.1");
+                ("202 Accepted", job_response.clone())
+            } else {
+                assert!(bytes.starts_with(b"GET /status "));
+                (
+                    "200 OK",
+                    json!({"status":"ready","repository":"AsukaCC/SMTP","platform":"linux/amd64","current_version":env!("CARGO_PKG_VERSION"),"job":null}),
+                )
+            };
+            let body = body.to_string();
+            stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let mut fixture = state.clone();
+    let mut config = (*state.config).clone();
+    config.update_socket = Some(socket);
+    fixture.config = Arc::new(config);
+    *fixture.updates.lock().await = Some(bunmail_rs::updates::Check {
+        status: "update_available".into(),
+        checked_at: chrono::Utc::now(),
+        latest_version: Some("0.1.1".into()),
+        release_url: None,
+        packages: vec![bunmail_rs::updates::Package {
+            name: "bunmail-rs-0.1.1-linux-amd64.tar.gz".into(),
+            platform: "linux/amd64".into(),
+            size: 100,
+        }],
+    });
+    let app = web::router(fixture);
+    let (_, _, status) = request(
+        &app,
+        "GET",
+        "/api/v1/updates",
+        json!({}),
+        Some(cookie),
+        false,
+    )
+    .await;
+    assert_eq!(status["can_install"], true);
+    let (code, _, body) = request(
+        &app,
+        "POST",
+        "/api/v1/updates/install",
+        json!({"version":"0.1.1","request_id":request_id}),
+        Some(cookie),
+        true,
+    )
+    .await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    assert_eq!(body, job);
+    server.await.unwrap();
 }
 
 async fn verify_dns_cooldown(state: &AppState, cookie: &str, id: Uuid) {
@@ -1328,5 +1488,154 @@ async fn verify_templates_preview_and_test_send(
         )
         .unwrap()
         .contains("DKIM-Signature:")
+    );
+}
+
+async fn verify_single_admin_migration(db: &PgPool) {
+    // Roll back the upgrade fixture so the same isolated database also tests a fresh install.
+    let mut tx = db.begin().await.unwrap();
+    for sql in [
+        include_str!("../migrations/0001_initial.sql"),
+        include_str!("../migrations/0002_delivery_settings.sql"),
+        "INSERT INTO owner (email,password_hash) VALUES ('owner@example.test','admin-hash')",
+        include_str!("../migrations/0003_accounts.sql"),
+        "INSERT INTO accounts (id,email,password_hash,role) VALUES (gen_random_uuid(),'person@example.test','user-hash','user');
+         INSERT INTO sessions (token_hash,account_id,expires_at) SELECT role,id,now()+interval '1 hour' FROM accounts;
+         INSERT INTO account_tokens (token_hash,purpose,email,account_id,expires_at) SELECT role,'reset',email,id,now()+interval '1 hour' FROM accounts;
+         INSERT INTO account_tokens (token_hash,purpose,email,password_hash,expires_at) VALUES ('pending','verify','pending@example.test','pending-hash',now()+interval '1 day');
+         INSERT INTO registration_settings (enabled) VALUES (true);
+         INSERT INTO templates (id,name,subject) VALUES (gen_random_uuid(),'kept-template','subject');
+         INSERT INTO api_keys (id,name,prefix,token_hash) VALUES (gen_random_uuid(),'kept-key','prefix','hash');
+         INSERT INTO domains (id,name,public_key,private_key) VALUES (gen_random_uuid(),'example.test','public','encrypted');
+         INSERT INTO emails (id,domain_id,from_address,to_address,subject,message_id,request_hash) SELECT gen_random_uuid(),id,'from@example.test','to@example.test','kept-email','message','hash' FROM domains;",
+    ] {
+        sqlx::raw_sql(sql).execute(&mut *tx).await.unwrap();
+    }
+    let admin_id: Uuid = sqlx::query_scalar("SELECT id FROM accounts WHERE role='admin'")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0004_single_admin.sql"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let accounts: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id,email,password_hash FROM accounts")
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(
+        accounts,
+        vec![(admin_id, "owner@example.test".into(), "admin-hash".into())]
+    );
+    for table in ["sessions", "account_tokens"] {
+        let ids: Vec<Uuid> = sqlx::query_scalar(&format!("SELECT account_id FROM {table}"))
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![admin_id]);
+    }
+    sqlx::raw_sql(include_str!(
+        "../migrations/0005_remove_password_recovery.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('account_tokens')::text")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for table in ["owner", "templates", "api_keys", "domains", "emails"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM emails")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        "queued"
+    );
+    tx.rollback().await.unwrap();
+}
+
+async fn verify_single_admin(app: &axum::Router, state: &AppState, cookie: &str) {
+    let email_count: i64 = sqlx::query_scalar("SELECT count(*) FROM emails")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let password_hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM accounts WHERE role='admin'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    for (method, path) in [
+        ("GET", "/api/v1/registration"),
+        ("POST", "/api/v1/register"),
+        ("POST", "/api/v1/register/verify"),
+        ("PUT", "/api/v1/config/registration"),
+        ("POST", "/api/v1/password/forgot"),
+        ("POST", "/api/v1/password/reset"),
+    ] {
+        for credential in [None, Some(cookie)] {
+            assert_eq!(
+                request(app, method, path, json!({"enabled":true,"email":"owner@example.test","token":"a".repeat(64),"password":"unused-new-password"}), credential, true)
+                    .await
+                    .0,
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM emails")
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        email_count
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT password_hash FROM accounts WHERE role='admin'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        password_hash
+    );
+    assert_eq!(
+        request(app, "GET", "/api/v1/me", json!({}), Some(cookie), false)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert!(
+        request(app, "GET", "/api/v1/config", json!({}), Some(cookie), false)
+            .await
+            .2
+            .get("registration_enabled")
+            .is_none()
+    );
+    for role in ["admin", "user"] {
+        assert!(sqlx::query("INSERT INTO accounts (id,email,password_hash,role) VALUES ($1,'extra@example.test','unused',$2)")
+            .bind(Uuid::new_v4()).bind(role).execute(&state.db).await.is_err());
+    }
+    assert_eq!(
+        request(
+            app,
+            "POST",
+            "/api/v1/login",
+            json!({"email":"person@example.test","password":"registered-user-password"}),
+            None,
+            true
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
     );
 }

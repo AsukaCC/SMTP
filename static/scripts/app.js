@@ -43,12 +43,28 @@ async function applyCloudflare(id){
 }
 const esc = value => String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll(String.fromCharCode(34),"&quot;").replaceAll("'","&#39;");
 const verifyCooldowns = new Map(), verifyPending = new Set();
-let updateStatus=null, updateChecking=false, updateDeadline=0;
+let updateStatus=null, updateChecking=false, updateDeadline=0, updateInstalling=false, updatePolling=false, updateRequest=null;
 const updateLabels={not_checked:"Not checked",update_available:"Update available",up_to_date:"Up to date",ahead:"Ahead of latest release",no_release:"No public release found",check_failed:"Update check failed",disabled:"Update checks disabled"};
+const updateStages={queued:"Update queued",downloading:"Downloading package",validating:"Validating package",backing_up:"Backing up database and keys",installing:"Installing and checking health",rolling_back:"Restoring previous version",succeeded:"Update completed",rolled_back:"Update failed; previous version restored",failed:"Update failed",interrupted:"Update interrupted"};
+const updateErrors={schema_mismatch:"Database migration differs; manual upgrade required",platform_mismatch:"Package architecture does not match",package_missing:"No compatible build package",package_invalid:"Package verification failed",checksum_mismatch:"Package verification failed",archive_invalid:"Package verification failed",release_changed:"Release changed; check again",insufficient_space:"Insufficient disk space",update_interrupted:"Update interrupted; check deployment status",update_failed:"Update failed; check deployment status"};
 function versionPanel(){
   const data=updateStatus;
+  const installer=data.installer||{status:"disabled"},job=installer.job;
+  const availability=installer.status==="disabled"?"Update service not configured":installer.status==="offline"?"Update service offline":installer.status==="blocked"?"Deployment needs attention":installer.repository!==data.repository?"Update repository mismatch":!data.package&&data.status==="update_available"?"No compatible build package":"";
   const link=(url,label)=>`<a class="btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${icon("external-link")}${tr(label)}</a>`;
-  return `<section class="version-section"><div class="section-head"><h2>${tr("Version updates")}</h2><button class="btn" data-action="check-updates">${icon("refresh-cw")}${tr("Check for updates")}</button></div><p class="update-status ${data.status==="check_failed"?"error":"muted"}" role="status">${tr(updateLabels[data.status]||"Update check failed")}</p><dl class="details">${detail("Current version",data.current_version)}${detail("Latest release",data.check?.latest_version||"-")}${detail("Release repository",data.repository||t("Update checks disabled"))}${detail("Last checked",date(data.check?.checked_at))}</dl><div class="row version-actions">${data.releases_url?link(data.check?.release_url||data.releases_url,"Release page"):""}<button class="btn" data-action="update-commands">${icon("terminal")}${tr("Server commands")}</button></div></section>`;
+  return `<section class="version-section"><div class="section-head"><h2>${tr("Version updates")}</h2><button class="btn" data-action="check-updates">${icon("refresh-cw")}${tr("Check for updates")}</button></div><p class="update-status ${data.status==="check_failed"?"error":"muted"}" role="status">${tr(updateLabels[data.status]||"Update check failed")}</p><dl class="details">${detail("Current version",data.current_version)}${detail("Latest release",data.check?.latest_version||"-")}${detail("Release repository",data.repository||t("Update checks disabled"))}${detail("Last checked",date(data.check?.checked_at))}${data.package?detail("Build package",data.package.name):""}</dl>${availability?`<p class="muted">${tr(availability)}</p>`:""}<div class="update-job" role="status" aria-live="polite">${job?`<p class="${["failed","interrupted","rolled_back"].includes(job.status)?"error":"notice"}">${esc(job.version)} · ${tr(updateStages[job.status]||"Update failed")}${job.error?`<br>${tr(updateErrors[job.error]||"Update failed; check deployment status")}`:""}</p>`:""}</div><div class="row version-actions">${data.status==="update_available"?`<button class="btn primary" data-action="install-update" ${!data.can_install||updateInstalling?"disabled":""}>${icon("download")}${tr("Install update")}</button>`:""}${data.releases_url?link(data.check?.release_url||data.releases_url,"Release page"):""}<button class="btn" data-action="update-commands">${icon("terminal")}${tr("Server commands")}</button></div></section>`;
+}
+async function pollUpdateStatus(){
+  if(updatePolling||updateChecking||updateInstalling||!user||section()!=="settings"||document.visibilityState!=="visible"||$("#dialog").open)return;
+  updatePolling=true;const request=sequence;
+  try{
+    const data=await api("/updates");
+    if(request!==sequence||!user||section()!=="settings")return;
+    updateStatus=data;updateDeadline=Date.now()+data.retry_after_seconds*1000;
+    if(["succeeded","failed","rolled_back","interrupted"].includes(data.installer?.job?.status))updateRequest=null;
+    const panel=$(".version-section");if(panel){panel.outerHTML=versionPanel();icons();updateCheckButton();}
+  }catch(_){if(user&&section()==="settings"&&$(".update-job"))$(".update-job").textContent=t("Reconnecting to service");}
+  finally{updatePolling=false;}
 }
 function updateCheckButton(){
   const button=$('[data-action="check-updates"]');if(!button)return;
@@ -137,12 +153,19 @@ async function api(path, options={}) {
 }
 function empty(label, name="inbox") {return `<div class="empty">${icon(name)}<p>${tr(label)}</p></div>`;}
 function heading(title, actions="", subtitle="") {return `<div class="heading"><div><h1>${tr(title)}</h1>${subtitle?`<p>${tr(subtitle)}</p>`:""}</div><div class="row">${actions}</div></div>${config?.rdns_warning&&["dashboard","send","settings"].includes(section())?rdnsNotice():""}`;}
-function renderLogin(error="") {
+async function renderLogin(error="") {
   renderedSection="";renderedHTML="";
   document.documentElement.lang=locale;
   document.title=`${t("Sign in")} · BunMail RS`;
-  $("#app").innerHTML=`<main class="login"><div class="login-inner"><div class="brand"><img src="/assets/logo.svg" alt="">BunMail <small>RS</small></div><h1>${tr("Sign in")}</h1><p class="muted">${tr("Personal instance")}</p><form id="login-form" class="form"><div class="field"><label for="email">${tr("Email")}</label><input id="email" name="email" type="email" autocomplete="username" required></div><div class="field"><label for="password">${tr("Password")}</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required></div><div class="error" id="login-error" ${error?"":"hidden"}>${tr(error)}</div><button class="btn primary" type="submit">${icon("log-in")}${tr("Sign in")}</button></form>${preferences()}</div></main>`;
+  const body=`<form id="login-form" class="form"><div class="field"><label for="email">${tr("Email")}</label><input id="email" name="email" type="email" autocomplete="username" required></div>${passwordField("password","Password","current-password",false)}<div class="error" id="login-error" ${error?"":"hidden"}>${tr(error)}</div><button class="btn primary" type="submit">${icon("log-in")}${tr("Sign in")}</button></form>`;
+  $("#app").innerHTML=`<main class="login"><div class="login-inner"><div class="brand"><img src="/assets/logo.svg" alt="">BunMail <small>RS</small></div><h1>${tr("Sign in")}</h1><p class="muted">${tr("Personal instance")}</p>${body}${preferences()}</div></main>`;
   icons();
+}
+async function enterSession(account) {
+  user=account;
+  history.replaceState(null,"",location.pathname+location.hash);
+  activeHash=location.hash;
+  config=await api("/config");await render();
 }
 function shell() {
   document.documentElement.lang=locale;
@@ -261,6 +284,7 @@ async function pollTest(id){
 }
 function detail(label,value) {return `<dt>${tr(label)}</dt><dd>${esc(value)}</dd>`;}
 function field(name,label,type="text",required=false,value="") {return `<div class="field"><label for="${name}">${tr(label)}${required?`<span class="required-mark" aria-label="${tr("Required")}">*</span>`:""}</label><input id="${name}" name="${name}" type="${type}" ${required?"required":""} value="${esc(value)}" maxlength="${name==="subject"?998:254}"></div>`;}
+function passwordField(name,label,autocomplete,mark=true) {return `<div class="field"><label for="${name}">${tr(label)}${mark?`<span class="required-mark" aria-label="${tr("Required")}">*</span>`:""}</label><div class="password-field"><input id="${name}" name="${name}" type="password" autocomplete="${autocomplete}" required maxlength="256"><button type="button" class="btn icon" data-action="toggle-password" aria-pressed="false" aria-label="${tr("Show password")}" title="${tr("Show password")}">${icon("eye")}</button></div></div>`;}
 function area(name,label,rows=6,value="") {return `<div class="field"><label for="${name}">${tr(label)}</label><textarea id="${name}" name="${name}" rows="${rows}" ${name==="html"?'class="mono"':""}>${esc(value)}</textarea></div>`;}
 function modal(title,html,wide=false) {
   clearTimeout(testTimer);dialogDirty=false;const d=$("#dialog");if(d.open)d.close();d.dataset.emailId="";d.dataset.cloudflareId="";d.classList.toggle("wide",wide);d.setAttribute("aria-labelledby","dialog-title");d.innerHTML=`<div class="dialog-head"><h2 id="dialog-title">${tr(title)}</h2>${button("close","x","Close")}</div>${html}`;d.showModal();icons();$("input,textarea",d)?.focus();
@@ -283,7 +307,7 @@ document.addEventListener("submit",async event=>{
   const values=Object.fromEntries(new FormData(form));
   try {
     if(form.id==="email-search-form"){emailSearch=values.search.trim();page=0;await render();return;}
-    if(form.id==="login-form") {user=await api("/login",{method:"POST",body:JSON.stringify(values)});config=await api("/config");await render();return;}
+    if(form.id==="login-form") {await enterSession(await api("/login",{method:"POST",body:JSON.stringify(values)}));return;}
     if(form.id==="domain-form") {await api("/domains",{method:"POST",body:JSON.stringify(values)});$("#dialog").close();toast("Saved");await render();}
     if(form.id==="key-form") {const key=await api("/api-keys",{method:"POST",body:JSON.stringify(values)});await render();modal("Key created",`<p class="muted">${tr("This key is shown only once.")}</p><pre class="reveal" id="new-key">${esc(key.token)}</pre><div class="form-foot"><button class="btn primary" data-action="copy-key">${icon("copy")}${tr("Copy")}</button></div>`);}
     if(form.id==="template-form") {const {preview_variables,...input}=values;await api(`/templates${form.dataset.id?`/${form.dataset.id}`:""}`,{method:form.dataset.id?"PUT":"POST",body:JSON.stringify(input)});dialogDirty=false;$("#dialog").close();toast("Saved");await render();}
@@ -304,6 +328,19 @@ document.addEventListener("submit",async event=>{
   finally{delete form.dataset.busy;form.removeAttribute("aria-busy");if(submit)submit.disabled=false;}
 });
 document.addEventListener("click",async event=>{
+  const reveal=event.target.closest("[data-action='toggle-password']");
+  if(reveal){
+    const input=reveal.parentElement.querySelector("input");
+    const shown=input.type==="password";
+    input.type=shown?"text":"password";
+    const label=shown?"Hide password":"Show password";
+    reveal.setAttribute("aria-pressed",String(shown));
+    reveal.setAttribute("aria-label",t(label));
+    reveal.title=t(label);
+    reveal.innerHTML=icon(shown?"eye-off":"eye");
+    icons();
+    return;
+  }
   const themeButton=event.target.closest("button[data-theme-choice]");
   if(themeButton){
     window.bunmailTheme?.set(themeButton.dataset.themeChoice);
@@ -348,6 +385,19 @@ document.addEventListener("click",async event=>{
         updateChecking=true;updateCheckButton();
         try{updateStatus=await api("/updates/check",{method:"POST"});updateDeadline=Date.now()+updateStatus.retry_after_seconds*1000;if(section()==="settings")await render();}
         finally{updateChecking=false;updateCheckButton();}break;
+      case "install-update":{
+        if(updateInstalling||!updateStatus?.can_install)break;
+        const version=updateStatus.check.latest_version;
+        if(!confirm(t("Install {version}? The service will restart after database and key backup.").replace("{version}",version)))break;
+        if(updateRequest?.version!==version||["succeeded","failed","rolled_back","interrupted"].includes(updateStatus.installer?.job?.status))updateRequest={version,request_id:crypto.randomUUID()};
+        updateInstalling=true;
+        try{
+          const job=await api("/updates/install",{method:"POST",body:JSON.stringify(updateRequest)});
+          updateStatus.installer.job=job;updateStatus.can_install=false;
+          const panel=$(".version-section");if(panel){panel.outerHTML=versionPanel();icons();}
+        }finally{updateInstalling=false;}
+        break;
+      }
       case "update-commands":commandDialog();break;
       case "copy-update-command":case "copy-rollback-command":await navigator.clipboard.writeText($(action.dataset.action==="copy-update-command"?"#update-command":"#rollback-command").textContent);toast("Copied");break;
       case "menu":$(".sidebar").classList.toggle("open");$(".menu-backdrop").hidden=!$(".sidebar").classList.contains("open");$(".mobile-menu").setAttribute("aria-expanded",String(!$(".menu-backdrop").hidden));break;
@@ -408,4 +458,5 @@ window.addEventListener("hashchange",()=>{
 setInterval(()=>{if(user&&!$("#dialog").open&&!hasUnsavedChanges()&&!document.activeElement.closest("#content")&&["dashboard","emails"].includes(section())&&document.visibilityState==="visible")void render({background:true});},30000);
 setInterval(updateVerifyButtons,1000);
 setInterval(updateCheckButton,1000);
-(async()=>{try{user=await api("/me");config=await api("/config");await render();}catch(error){renderLogin(error.status===401?"":error.message);}})();
+setInterval(pollUpdateStatus,3000);
+(async()=>{try{user=await api("/me");await enterSession(user);}catch(error){renderLogin(error.status===401?"":error.message);}})();

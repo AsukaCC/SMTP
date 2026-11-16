@@ -2,13 +2,19 @@
 """在临时目录和一次性 Docker 卷验证发布流程；不接触现有实例。"""
 import argparse
 import gzip
+import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
 import socket
 import subprocess
 import tempfile
+import tarfile
+import time
 import uuid
+from unittest.mock import patch
+import updater
 from deploy import Deployment, digest, read_package, write_json
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -17,6 +23,10 @@ args = parser.parse_args()
 source = args.package.resolve()
 base = read_package(source)
 tags = []
+major, minor, patch_number = map(int, base['version'].split('.'))
+good_version, broken_version, newer_version = (
+    f'{major}.{minor}.{patch_number + step}' for step in (1, 2, 3)
+)
 
 
 def run(*command, **kwargs):
@@ -68,25 +78,46 @@ with tempfile.TemporaryDirectory(prefix='bunmail-release-test-') as temporary:
             write_json(directory / 'release.json', manifest)
             return directory
 
-        good = fixture('0.1.1')
-        broken = fixture('0.1.2', fail=True)
-        newer = fixture('0.1.3')
-        app.change('update', good)
-        assert app.state()['current']['version'] == '0.1.1'
+        good = fixture(good_version)
+        broken = fixture(broken_version, fail=True)
+        newer = fixture(newer_version)
+        agent = updater.Updater(instance)
+        agent.deployment.timeout = 45
+
+        def web_update(directory, expected):
+            number = directory.name
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode='w:gz') as stream:
+                for name in (*base['files'], 'release.json'):
+                    stream.add(directory / name, arcname=name, recursive=False)
+            data = archive.getvalue()
+            name = f"bunmail-rs-{number}-{base['platform'].replace('/', '-')}.tar.gz"
+            asset = {'name': name, 'state': 'uploaded', 'size': len(data),
+                     'digest': 'sha256:' + hashlib.sha256(data).hexdigest(),
+                     'browser_download_url': f'https://github.com/{agent.repo}/releases/download/v{number}/{name}'}
+            release = {'tag_name': 'v' + number, 'draft': False, 'prerelease': False, 'assets': [asset]}
+            request = {'version': number, 'repository': agent.repo, 'request_id': str(uuid.uuid4())}
+            with patch.object(updater, 'fetch_release', return_value=release), \
+                    patch.object(updater, 'open_url', side_effect=lambda _: io.BytesIO(data)):
+                agent.submit(request)
+                deadline = time.monotonic() + 240
+                while agent.status()['job']['status'] in updater.ACTIVE and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                assert agent.status()['job']['status'] == expected, agent.status()
+            assert agent.path.exists()
+
+        web_update(good, 'succeeded')
+        assert app.state()['current']['version'] == good_version
         app.change('rollback')
         assert app.state()['current']['version'] == base['version']
         app.change('update', good)
         print('PASS update and rollback', flush=True)
-        try:
-            app.change('update', broken)
-            raise AssertionError('broken image accepted')
-        except ValueError as error:
-            assert '已自动恢复' in str(error), str(error)
-        assert app.state()['current']['version'] == '0.1.1'
+        web_update(broken, 'rolled_back')
+        assert app.state()['current']['version'] == good_version
         print('PASS automatic recovery', flush=True)
-        app.change('update', newer)
+        web_update(newer, 'succeeded')
         state = app.state()
-        assert sorted(p.name for p in (app.meta / 'releases').iterdir()) == ['0.1.1', '0.1.3']
+        assert sorted(p.name for p in (app.meta / 'releases').iterdir()) == sorted([good_version, newer_version])
         assert not list(app.meta.rglob('image.tar.gz'))
         current = state['current']
         output = app.compose(current, 'exec', '-T', 'db', 'psql', '-U', 'bunmail', '-d', 'bunmail', '-Atc', "SELECT text FROM templates WHERE name='release fixture'", capture_output=True, text=True).stdout.strip()

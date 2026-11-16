@@ -18,9 +18,10 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 pub async fn bootstrap(state: &AppState) -> anyhow::Result<()> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM owner)")
-        .fetch_one(&state.db)
-        .await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE role='admin')")
+            .fetch_one(&state.db)
+            .await?;
     if exists {
         return Ok(());
     }
@@ -40,42 +41,24 @@ pub async fn bootstrap(state: &AppState) -> anyhow::Result<()> {
     .await?
     .map_err(|_| anyhow::anyhow!("Password hashing failed"))?;
     let mut tx = state.db.begin().await?;
-    let inserted = sqlx::query(
+    sqlx::query(
         "INSERT INTO owner (email, password_hash) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING",
     )
     .bind(&state.config.owner_email)
-    .bind(hash)
+    .bind(&hash)
+    .execute(&mut *tx)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO accounts (id, email, password_hash, role) VALUES ($1,$2,$3,'admin') ON CONFLICT (email) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&state.config.owner_email)
+    .bind(&hash)
     .execute(&mut *tx)
     .await?;
     if inserted.rows_affected() == 1 {
         crate::initial_templates::insert_missing(&mut tx).await?;
     }
-    tx.commit().await?;
-    Ok(())
-}
-
-pub async fn reset_password(state: &AppState, password: String) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        (15..=256).contains(&password.len()),
-        "Password must have 15 to 256 bytes"
-    );
-    let password = zeroize::Zeroizing::new(password);
-    let hash = tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
-            .map(|hash| hash.to_string())
-    })
-    .await?
-    .map_err(|_| anyhow::anyhow!("Password hashing failed"))?;
-    let mut tx = state.db.begin().await?;
-    let result = sqlx::query("UPDATE owner SET password_hash=$1")
-        .bind(hash)
-        .execute(&mut *tx)
-        .await?;
-    anyhow::ensure!(result.rows_affected() == 1, "Owner is not initialized");
-    sqlx::query("DELETE FROM sessions")
-        .execute(&mut *tx)
-        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -105,18 +88,46 @@ pub fn check_origin(headers: &HeaderMap, state: &AppState) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Admin,
+    Key,
+}
+
 #[derive(Clone)]
 pub struct Auth {
     pub api_key_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
+    pub role: Role,
 }
 impl Auth {
     pub fn require_admin(&self) -> Result<()> {
-        if self.api_key_id.is_some() {
-            Err(AppError::forbidden())
-        } else {
+        if self.role == Role::Admin {
             Ok(())
+        } else {
+            Err(AppError::forbidden())
         }
     }
+
+    pub fn require_session(&self) -> Result<()> {
+        if self.account_id.is_some() {
+            Ok(())
+        } else {
+            Err(AppError::forbidden())
+        }
+    }
+}
+
+async fn password_matches(hash: String, password: String) -> Result<bool> {
+    tokio::task::spawn_blocking(move || {
+        PasswordHash::new(&hash).is_ok_and(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
+    })
+    .await
+    .map_err(|_| AppError::internal())
 }
 
 pub async fn api_key(state: &AppState, token: &str) -> Result<Uuid> {
@@ -141,25 +152,31 @@ impl FromRequestParts<AppState> for Auth {
                 .ok_or_else(AppError::unauthorized)?;
             return Ok(Self {
                 api_key_id: Some(api_key(state, token).await?),
+                account_id: None,
+                role: Role::Key,
             });
         }
         let token = cookie_token(&parts.headers).ok_or_else(AppError::unauthorized)?;
         if token.len() != 64 {
             return Err(AppError::unauthorized());
         }
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=$1 AND expires_at > now())",
+        let account: Option<Uuid> = sqlx::query_scalar(
+            "SELECT a.id FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token_hash=$1 AND s.expires_at>now() AND a.role='admin'",
         )
         .bind(crypto::hash(token))
-        .fetch_one(&state.db)
+        .fetch_optional(&state.db)
         .await?;
-        if !exists {
+        let Some(account_id) = account else {
             return Err(AppError::unauthorized());
-        }
+        };
         if parts.method != axum::http::Method::GET && parts.method != axum::http::Method::HEAD {
             check_origin(&parts.headers, state)?;
         }
-        Ok(Self { api_key_id: None })
+        Ok(Self {
+            api_key_id: None,
+            account_id: Some(account_id),
+            role: Role::Admin,
+        })
     }
 }
 
@@ -186,40 +203,47 @@ pub async fn login(
     if input.password.len() > 256 || input.email.len() > 254 {
         return Err(AppError::unauthorized());
     }
-    let (email, hash): (String, String) = sqlx::query_as("SELECT email, password_hash FROM owner")
-        .fetch_one(&state.db)
-        .await?;
-    let verified = tokio::task::spawn_blocking(move || {
-        PasswordHash::new(&hash).is_ok_and(|parsed| {
-            Argon2::default()
-                .verify_password(input.password.as_bytes(), &parsed)
-                .is_ok()
-        })
-    })
-    .await
-    .map_err(|_| AppError::internal())?;
-    if !verified || input.email.to_lowercase() != email {
-        return Err(AppError(
-            StatusCode::UNAUTHORIZED,
-            "INVALID_LOGIN",
-            "Invalid email or password".into(),
-        ));
+    let account: Option<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT id, email, password_hash, role FROM accounts WHERE email=$1 AND role='admin'",
+    )
+    .bind(input.email.to_lowercase())
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((id, email, hash, role)) = account else {
+        return Err(invalid_login());
+    };
+    if !password_matches(hash, input.password).await? {
+        return Err(invalid_login());
     }
+    let response = start_session(&state, id).await?;
+    Ok((response, Json(json!({"email":email,"role":role}))))
+}
+
+fn invalid_login() -> AppError {
+    AppError(
+        StatusCode::UNAUTHORIZED,
+        "INVALID_LOGIN",
+        "Invalid email or password".into(),
+    )
+}
+
+pub(crate) async fn start_session(state: &AppState, account_id: Uuid) -> Result<HeaderMap> {
     let token = crypto::random_token();
     sqlx::query(
-        "INSERT INTO sessions (token_hash,expires_at) VALUES ($1,now()+interval '12 hours')",
+        "INSERT INTO sessions (token_hash,expires_at,account_id) VALUES ($1,now()+interval '12 hours',$2)",
     )
     .bind(crypto::hash(&token))
+    .bind(account_id)
     .execute(&state.db)
     .await?;
     let mut response = HeaderMap::new();
     response.insert(
         header::SET_COOKIE,
-        session_cookie(&state, &token, 43200)
+        session_cookie(state, &token, 43200)
             .parse()
             .map_err(|_| AppError::internal())?,
     );
-    Ok((response, Json(json!({"email":email}))))
+    Ok(response)
 }
 
 fn session_cookie(state: &AppState, token: &str, age: u32) -> String {
@@ -238,7 +262,7 @@ pub async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<Value>)> {
-    auth.require_admin()?;
+    auth.require_session()?;
     if let Some(token) = cookie_token(&headers) {
         sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
             .bind(crypto::hash(token))
@@ -256,9 +280,12 @@ pub async fn logout(
 }
 
 pub async fn me(auth: Auth, State(state): State<AppState>) -> Result<Json<Value>> {
-    auth.require_admin()?;
-    let email: String = sqlx::query_scalar("SELECT email FROM owner")
-        .fetch_one(&state.db)
-        .await?;
-    Ok(Json(json!({"email":email})))
+    auth.require_session()?;
+    let account_id = auth.account_id.ok_or_else(AppError::unauthorized)?;
+    let (email, role): (String, String) =
+        sqlx::query_as("SELECT email, role FROM accounts WHERE id=$1")
+            .bind(account_id)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(Json(json!({"email":email,"role":role})))
 }

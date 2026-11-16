@@ -162,9 +162,11 @@ pub async fn enqueue(
     let request_hash = crypto::hash(
         &serde_json::to_string(&input).map_err(|_| AppError::invalid("Invalid request"))?,
     );
-    let scope = auth
-        .api_key_id
-        .map_or_else(|| "owner".into(), |id| id.to_string());
+    let scope = if let Some(id) = auth.api_key_id {
+        id.to_string()
+    } else {
+        "owner".into()
+    };
     if let Some(ref key) = idempotency
         && let Some((id, existing_hash)) = sqlx::query_as::<_, (Uuid, String)>(
             "SELECT id,request_hash FROM emails WHERE idempotency_scope=$1 AND idempotency_key=$2",

@@ -100,21 +100,15 @@ docker compose -f docker-compose.yml -f docker-compose.smtp.yml up -d --wait
 
 客户端使用 `MAIL_HOSTNAME:587`、STARTTLS、用户名 `bunmail`，密码为后台创建的有效 API 密钥。证书信任验证必须开启，不提供无认证中继或明文 AUTH。管理页面显示的 SMTP 端口是容器内部监听端口 `2525`，客户端使用映射端口 `SMTP_PORT`（默认 `587`）。
 
-## 密码恢复与数据
+## 管理员凭据与数据
 
-修改 `.env` 的 `BOOTSTRAP_PASSWORD` 不会覆盖已有密码。服务器管理员可通过标准输入重置密码并撤销全部浏览器会话：
-
-```bash
-python3 scripts/reset-password.py
-```
-
-脚本隐藏输入，密码不出现在命令参数或日志；API 密钥不受密码重置影响。受管部署加上 `--directory /srv/bunmail`。
+管理员凭据仅在首次初始化时创建。修改 `.env` 的 `BOOTSTRAP_PASSWORD` 不会覆盖已有密码；应用不提供密码找回或密码重置命令。
 
 数据库位于独立 Docker 卷；日常备份必须同时保存数据库和 `.env` 中的 DKIM 加密密钥。不要用删除卷处理启动问题。服务器迁移需要转移数据卷、配置、证书并重建部署状态；不能把目录改名后直接当成新安装。
 
 ## 浏览器报错排查
 
-- `/api/v1/me` 在尚未登录或会话过期时返回 `401` 属于正常认证检查。登录接口的 `401 INVALID_LOGIN` 表示输入与数据库中已有的管理员凭据不符；如果后来已经登录，不需要为历史控制台日志重置密码。账号和初始密码仅在第一次初始化时生效。
+- `/api/v1/me` 在尚未登录或会话过期时返回 `401` 属于正常认证检查。登录接口的 `401 INVALID_LOGIN` 表示输入与数据库中已有的管理员凭据不符。账号和初始密码仅在第一次初始化时生效。
 - 旧版域名验证接口在同一域名 60 秒内检查超过 3 次时返回 `409 Please wait before checking DNS again`，这不是 DNS 记录冲突。停止重复点击并等待最多 60 秒。修复版使用 `429 RATE_LIMITED` 和 `Retry-After`，按钮显示倒计时，刷新页面后也会读取服务端剩余等待时间。实际 DNS 未全部通过时返回 `200`、`verified:false`，查看各项检查结果；DNS 查询异常则返回 `422`。
 - `static.cloudflareinsights.com/beacon.min.js` 被 CSP 阻止的是 Cloudflare 统计脚本，不是本应用的登录或 DNS 检查脚本。本应用维持 `script-src 'self'`，不会为解决统计提示而允许任意第三方脚本。响应新增 `Cache-Control: no-store, no-transform`，禁止缓存并阻止代理修改页面。Cloudflare 自动统计注入遵循 `no-transform`；如果仍有提示，在该域名的 Web Analytics / Browser Insights 配置中关闭自动注入，并检查是否配置了额外的脚本注入规则或 Worker。
 

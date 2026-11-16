@@ -147,6 +147,8 @@ impl Handler for Submission {
                 &self.state,
                 &Auth {
                     api_key_id: Some(id),
+                    account_id: None,
+                    role: auth::Role::Key,
                 },
                 input,
                 None,

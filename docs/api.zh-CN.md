@@ -64,12 +64,19 @@ Idempotency-Key: delivery-test-001
 
 ## 后台端点
 
+系统仅支持一个管理员账号，在首次启动时创建，不经过邮箱验证。注册、注册验证和注册开关接口已移除，访问 `/registration`、`/register`、`/register/verify` 或 `/config/registration` 返回 `404`。
+
+不提供管理员密码找回或密码重置命令。`POST /password/forgot` 和 `POST /password/reset` 返回 `404`，旧重置链接失效。
+
+升级迁移会删除旧普通账号及其会话，并移除全部注册和密码重置令牌，保留管理员及邮件、模板、密钥和队列数据。数据库约束禁止创建普通账号或第二个管理员。升级前按部署文档备份数据库与加密密钥。
+
 以下仅允许管理员会话访问：
 
 | 端点 | 方法与用途 |
 | --- | --- |
-| `/login`、`/logout` | POST 登录、退出 |
-| `/me`、`/config`、`/stats` | GET 当前账号、配置、统计 |
+| `/logout` | POST 退出 |
+| `/me` | GET 当前管理员账号，含 `role` |
+| `/config`、`/stats` | GET 配置、统计 |
 | `/domains` | GET 列表、POST 添加 `{name}` |
 | `/domains/{id}/verify` | POST 验证 DNS |
 | `/domains/{id}/cloudflare/preview` | POST 预览 Cloudflare DNS 变更，无外部写入 |
@@ -83,6 +90,11 @@ Idempotency-Key: delivery-test-001
 | `/emails/{id}` | GET 邮件及投递尝试详情 |
 | `/emails/{id}/retry` | POST 重试失败邮件 |
 | `/emails/{id}/cancel` | POST 取消尚未发送的队列邮件 |
+| `/updates` | GET 版本检查、匹配构建包、更新服务及任务状态 |
+| `/updates/check` | POST 检查 GitHub 最新正式 Release，60 秒内复用缓存 |
+| `/updates/install` | POST `{version,request_id}`，仅安装已检查且匹配的版本；`request_id` 为 UUID，成功返回 `202` 与任务状态 |
+
+更新仅接受管理员同源会话，发信 API 密钥无权调用。安装请求不接受任意下载地址、命令或目录。`GET /updates` 的 `can_install` 表示更新服务在线、版本和仓库一致且存在带 GitHub SHA256 摘要的匹配构建包；安装时仍重新校验 Release、文件散列、平台和迁移指纹。相同 `request_id` 不会重复启动任务。任务状态包含 `queued`、`downloading`、`validating`、`backing_up`、`installing`、`rolling_back`、`succeeded`、`rolled_back`、`failed`、`interrupted`。安装期间应用暂时不可达，恢复后继续查询 `/updates`；会话过期时重新登录。
 
 `GET /health` 无需登录，仅返回服务版本及数据库健康状态。错误格式统一为 `{"error":{"code":"…","message":"…"}}`，包含框架级 JSON、UUID、查询参数、体积和方法错误；管理用 HTML 预览端点保持隔离的 HTML 错误页面。429 包含 `Retry-After`；401 包含 Bearer 认证挑战。发信端点区分 `DELIVERY_PAUSED`、`DOMAIN_NOT_VERIFIED`、`IDEMPOTENCY_CONFLICT`，客户端应按错误码处理，不依赖英文消息文本。
 

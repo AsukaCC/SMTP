@@ -22,6 +22,7 @@ pub struct Config {
     pub smtp_key: Option<String>,
     pub development: bool,
     pub update_repository: Option<String>,
+    pub update_socket: Option<std::path::PathBuf>,
     pub cloudflare_api_token: Option<zeroize::Zeroizing<String>>,
     pub api_allowed_origins: Vec<String>,
 }
@@ -116,6 +117,10 @@ impl Config {
             update_repository: crate::updates::repository(
                 &env::var("UPDATE_REPOSITORY").unwrap_or_else(|_| "AsukaCC/SMTP".into()),
             )?,
+            update_socket: env::var("UPDATE_SOCKET")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from),
             cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty())
