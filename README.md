@@ -5,7 +5,7 @@
 ## 功能
 
 - 简体中文默认界面，支持英文切换并记住偏好。外观默认跟随系统，也可固定为浅色或深色。
-- 单管理员账户使用，不提供注册、普通账号、密码找回或密码重置命令。管理员无需邮箱验证。独立 API 密钥只允许发信。
+- 单管理员账户使用，不提供注册、普通账号、密码找回或密码重置命令。管理员无需邮箱验证，可在登录后校验当前密码并重设密码，保存后所有会话失效。独立 API 密钥只允许发信。
 - 发信域名、RSA 2048 DKIM 密钥、SPF / DKIM / DMARC / PTR / A 或 AAAA 检查。
 - rDNS 为可选告警，缺失时仍可发信；支持发件人显示名称，支持 Cloudflare DNS 预览及创建缺失记录。
 - HTTP API 发信、经过 STARTTLS 与认证的 SMTP 提交、纯文本及 HTML 模板。
@@ -15,7 +15,7 @@
 - Docker 部署，以及同目录防重复安装、更新前备份、健康检查失败恢复原版本、手动回退。
 - 后台手动检查 GitHub 正式发布；Docker 受管安装启用宿主机更新服务后，可直接安装匹配架构的构建包，查看下载、备份、安装与回退状态。
 
-服务采用 Axum、Tokio、SQLx 和 PostgreSQL；Lettre 处理 MIME、DKIM 和出站 SMTP，Mailin 处理提交协议状态，Hickory 负责 DNS。前端静态资源编译进同一个 Rust 二进制文件。
+服务采用 Axum、Tokio、SQLx 和 PostgreSQL；Lettre 处理 MIME、DKIM 和出站 SMTP，Mailin 处理提交协议状态，Hickory 负责 DNS。前端使用本地打包的 React / liquid-glass-react 渲染玻璃材质，静态资源编译进同一个 Rust 二进制文件，不依赖外部 CDN。
 
 ## 本地运行
 
@@ -43,9 +43,11 @@ docker compose up -d --build --wait
 
 ## 开发验证
 
-需要 Rust 1.91.1、Node.js（仅检查前端语法）、Docker、Python 3.11+、OpenSSL（SMTP 集成测试生成临时证书）。
+需要 Rust 1.91.1、Node.js 22+（构建玻璃材质和检查前端语法）、Docker、Python 3.11+、OpenSSL（SMTP 集成测试生成临时证书）。
 
 ```bash
+npm --prefix frontend ci
+npm --prefix frontend run build
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test

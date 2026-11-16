@@ -120,6 +120,7 @@ impl Auth {
 
 async fn password_matches(hash: String, password: String) -> Result<bool> {
     tokio::task::spawn_blocking(move || {
+        let password = zeroize::Zeroizing::new(password);
         PasswordHash::new(&hash).is_ok_and(|parsed| {
             Argon2::default()
                 .verify_password(password.as_bytes(), &parsed)
@@ -203,11 +204,13 @@ pub async fn login(
     if input.password.len() > 256 || input.email.len() > 254 {
         return Err(AppError::unauthorized());
     }
+    // Serialize login with password changes so a verified old password cannot create a new session.
+    let mut tx = state.db.begin().await?;
     let account: Option<(Uuid, String, String, String)> = sqlx::query_as(
-        "SELECT id, email, password_hash, role FROM accounts WHERE email=$1 AND role='admin'",
+        "SELECT id, email, password_hash, role FROM accounts WHERE email=$1 AND role='admin' FOR UPDATE",
     )
     .bind(input.email.to_lowercase())
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some((id, email, hash, role)) = account else {
         return Err(invalid_login());
@@ -215,7 +218,8 @@ pub async fn login(
     if !password_matches(hash, input.password).await? {
         return Err(invalid_login());
     }
-    let response = start_session(&state, id).await?;
+    let response = start_session(&state, &mut tx, id).await?;
+    tx.commit().await?;
     Ok((response, Json(json!({"email":email,"role":role}))))
 }
 
@@ -227,14 +231,18 @@ fn invalid_login() -> AppError {
     )
 }
 
-pub(crate) async fn start_session(state: &AppState, account_id: Uuid) -> Result<HeaderMap> {
+async fn start_session(
+    state: &AppState,
+    connection: &mut sqlx::PgConnection,
+    account_id: Uuid,
+) -> Result<HeaderMap> {
     let token = crypto::random_token();
     sqlx::query(
         "INSERT INTO sessions (token_hash,expires_at,account_id) VALUES ($1,now()+interval '12 hours',$2)",
     )
     .bind(crypto::hash(&token))
     .bind(account_id)
-    .execute(&state.db)
+    .execute(connection)
     .await?;
     let mut response = HeaderMap::new();
     response.insert(
@@ -255,6 +263,82 @@ fn session_cookie(state: &AppState, token: &str, age: u32) -> String {
             ""
         }
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangePassword {
+    current_password: String,
+    new_password: String,
+}
+
+pub async fn change_password(
+    auth: Auth,
+    State(state): State<AppState>,
+    Json(input): Json<ChangePassword>,
+) -> Result<(HeaderMap, Json<Value>)> {
+    auth.require_admin()?;
+    let account_id = auth.account_id.ok_or_else(AppError::forbidden)?;
+    if !state.rate_limit(format!("password:{account_id}"), 10, 300) {
+        return Err(AppError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "Too many attempts. Try again in five minutes".into(),
+        ));
+    }
+    if input.current_password.len() > 256 || !(15..=256).contains(&input.new_password.len()) {
+        return Err(AppError::invalid("Password must have 15 to 256 bytes"));
+    }
+    if input.current_password == input.new_password {
+        return Err(AppError::invalid(
+            "New password must differ from current password",
+        ));
+    }
+    let mut tx = state.db.begin().await?;
+    let hash: String = sqlx::query_scalar(
+        "SELECT password_hash FROM accounts WHERE id=$1 AND role='admin' FOR UPDATE",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !password_matches(hash, input.current_password).await? {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "INVALID_CURRENT_PASSWORD",
+            "Current password is incorrect".into(),
+        ));
+    }
+    let password = zeroize::Zeroizing::new(input.new_password);
+    let hash = tokio::task::spawn_blocking(move || {
+        Argon2::default()
+            .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+            .map(|hash| hash.to_string())
+    })
+    .await
+    .map_err(|_| AppError::internal())?
+    .map_err(|_| AppError::internal())?;
+    sqlx::query("UPDATE accounts SET password_hash=$1 WHERE id=$2")
+        .bind(&hash)
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE owner SET password_hash=$1")
+        .bind(&hash)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM sessions WHERE account_id=$1")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        session_cookie(&state, "", 0)
+            .parse()
+            .map_err(|_| AppError::internal())?,
+    );
+    Ok((headers, Json(json!({"ok":true}))))
 }
 
 pub async fn logout(

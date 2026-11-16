@@ -13,6 +13,7 @@ const INDEX_HTML: &str = include_str!("../../static/index.html");
 const APP_CSS: &str = concat!(
     include_str!("../../static/styles/tokens.css"),
     include_str!("../../static/styles/app.css"),
+    include_str!("../../static/styles/liquid.css"),
 );
 const APP_JS: &str = concat!(
     include_str!("../../static/scripts/i18n.js"),
@@ -43,6 +44,12 @@ async fn lucide() -> impl IntoResponse {
         include_str!("../../static/vendor/lucide.min.js"),
     )
 }
+async fn liquid_glass() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../../static/vendor/liquid-glass.js"),
+    )
+}
 async fn logo() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/svg+xml")],
@@ -67,7 +74,7 @@ async fn security(request: Request<Body>, next: Next) -> Response {
         header::REFERRER_POLICY,
         HeaderValue::from_static("same-origin"),
     );
-    headers.entry(header::CONTENT_SECURITY_POLICY).or_insert(HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
+    headers.entry(header::CONTENT_SECURITY_POLICY).or_insert(HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     response
 }
 
@@ -91,11 +98,16 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/app.js", get(js))
         .route("/assets/theme.js", get(theme_js))
         .route("/assets/lucide.js", get(lucide))
+        .route("/assets/liquid-glass.js", get(liquid_glass))
         .route("/assets/logo.svg", get(logo))
         .route("/health", get(api::health))
         .route("/api/v1/login", post(auth::login))
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
+        .route(
+            "/api/v1/admin/password",
+            axum::routing::put(auth::change_password),
+        )
         .route("/api/v1/openapi.json", get(crate::http_api::openapi))
         .route("/api/v1/config", get(api::config))
         .route(

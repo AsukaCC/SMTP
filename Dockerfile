@@ -1,3 +1,10 @@
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend ./
+RUN npm run build
+
 FROM rust:1.91.1-bookworm AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -5,6 +12,7 @@ COPY src ./src
 COPY migrations ./migrations
 COPY emails ./emails
 COPY static ./static
+COPY --from=frontend /static/vendor/liquid-glass.js ./static/vendor/liquid-glass.js
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

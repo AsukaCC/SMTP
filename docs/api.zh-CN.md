@@ -66,7 +66,7 @@ Idempotency-Key: delivery-test-001
 
 系统仅支持一个管理员账号，在首次启动时创建，不经过邮箱验证。注册、注册验证和注册开关接口已移除，访问 `/registration`、`/register`、`/register/verify` 或 `/config/registration` 返回 `404`。
 
-不提供管理员密码找回或密码重置命令。`POST /password/forgot` 和 `POST /password/reset` 返回 `404`，旧重置链接失效。
+不提供管理员密码找回或密码重置命令。`POST /password/forgot` 和 `POST /password/reset` 返回 `404`，旧重置链接失效。已登录管理员可通过 `PUT /admin/password` 提交 `{current_password,new_password}` 设置新密码；要求同源会话、校验当前密码、新密码为 15–256 字节且不同于原密码。每个管理员每五分钟最多尝试十次，API 密钥无权调用。成功后撤销全部管理员会话并清除当前 Cookie，需使用新密码重新登录。
 
 升级迁移会删除旧普通账号及其会话，并移除全部注册和密码重置令牌，保留管理员及邮件、模板、密钥和队列数据。数据库约束禁止创建普通账号或第二个管理员。升级前按部署文档备份数据库与加密密钥。
 
@@ -76,6 +76,7 @@ Idempotency-Key: delivery-test-001
 | --- | --- |
 | `/logout` | POST 退出 |
 | `/me` | GET 当前管理员账号，含 `role` |
+| `/admin/password` | PUT 校验当前密码并重设管理员密码 |
 | `/config`、`/stats` | GET 配置、统计 |
 | `/domains` | GET 列表、POST 添加 `{name}` |
 | `/domains/{id}/verify` | POST 验证 DNS |

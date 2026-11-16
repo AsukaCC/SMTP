@@ -127,7 +127,7 @@ function formError(form,message){let error=$(".form-error",form);if(!error){erro
 function closeDialog(){if(dialogDirty&&!confirm(t("Changes not saved. Leave this page?")))return false;dialogDirty=false;$("#dialog").close();return true;}
 const sections = [["dashboard","layout-dashboard","Dashboard"],["send","send","Send email"],["emails","mail","Emails"],["domains","globe","Domains"],["templates","file-text","Templates"],["keys","key-round","API keys"],["settings","settings-2","Settings"]];
 let section = () => sections.some(s => s[0] === location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
-function icons() { window.lucide?.createIcons({attrs:{"stroke-width":1.7}}); }
+function icons() { window.lucide?.createIcons({attrs:{"stroke-width":1.7}}); window.bunmailGlass?.refresh(); }
 function language() { return `<div class="language" role="group" aria-label="Language"><button type="button" data-locale="zh-CN" class="${locale==="zh-CN"?"selected":""}" aria-pressed="${locale==="zh-CN"}">简体中文</button><button type="button" data-locale="en" class="${locale==="en"?"selected":""}" aria-pressed="${locale==="en"}">English</button></div>`; }
 function themeControl() {
   const choice = window.bunmailTheme?.choice?.() || "system";
@@ -158,7 +158,7 @@ async function renderLogin(error="") {
   document.documentElement.lang=locale;
   document.title=`${t("Sign in")} · BunMail RS`;
   const body=`<form id="login-form" class="form"><div class="field"><label for="email">${tr("Email")}</label><input id="email" name="email" type="email" autocomplete="username" required></div>${passwordField("password","Password","current-password",false)}<div class="error" id="login-error" ${error?"":"hidden"}>${tr(error)}</div><button class="btn primary" type="submit">${icon("log-in")}${tr("Sign in")}</button></form>`;
-  $("#app").innerHTML=`<main class="login"><div class="login-inner"><div class="brand"><img src="/assets/logo.svg" alt="">BunMail <small>RS</small></div><h1>${tr("Sign in")}</h1><p class="muted">${tr("Personal instance")}</p>${body}${preferences()}</div></main>`;
+  $("#app").innerHTML=`<main class="login"><section class="login-story" aria-label="${tr("Your mail. Your space.")}"><span class="eyebrow">${tr("BUNMAIL / PERSONAL MAIL SERVER")}</span><div class="login-emblem">${icon("mail")}</div><h2>${tr("Your mail.")}<br><span>${tr("Your space.")}</span></h2><p>${tr("A quiet home for every message. One workspace, entirely yours.")}</p><div class="story-foot"><span class="story-dot"></span>${tr("Self-hosted. Simply connected.")}</div></section><div class="login-inner"><div class="brand"><img src="/assets/logo.svg" alt="">BunMail <small>RS</small></div><span class="eyebrow">${tr("ADMINISTRATOR ACCESS")}</span><h1>${tr("Welcome back")}</h1><p class="muted">${tr("Sign in to your personal mail workspace.")}</p>${body}${preferences()}</div></main>`;
   icons();
 }
 async function enterSession(account) {
@@ -219,7 +219,7 @@ async function render({background=false}={}) {
     } else {
       updateStatus=await api("/updates");updateDeadline=Date.now()+updateStatus.retry_after_seconds*1000;
       html=heading("Settings",button("refresh","refresh-cw","Refresh"))+readiness()+`<div class="settings-grid"><section><h2>${icon("server")}${tr("Version & deployment")}</h2><dl class="details">${detail("Service version",`BunMail RS ${config.version}`)}${detail("Mail hostname",config.mail_hostname)}${detail("Public IP",config.public_ip||t("Not configured"))}${detail("Status",t(config.delivery_enabled?"Delivery enabled":"Delivery paused"))}</dl></section><section><h2>${icon("network")}${tr("SMTP submission")}</h2><dl class="details">${detail("Status",t(config.smtp_enabled?"Enabled":"Disabled"))}${detail("SMTP port",config.smtp_port||"-")}${detail("Transport",t("STARTTLS required"))}${detail("SMTP username","bunmail")}${detail("SMTP password",t("An active API key"))}</dl></section><section><h2>${icon("code-2")}${tr("HTTP API")}</h2><dl class="details">${detail("API endpoint",`${location.origin}/api/v1/emails/send`)}${detail("Authentication",t("Bearer API key"))}</dl></section></div>`;
-      html+=`<div class="row version-actions"><a class="btn" href="/api/v1/openapi.json" download="bunmail-openapi.json">${icon("download")}${tr("Download OpenAPI")}</a></div>`+versionPanel();
+      html+=`<section class="security-section"><div class="security-icon">${icon("shield-check")}</div><div><span class="eyebrow">${tr("ACCOUNT SECURITY")}</span><h2>${tr("Administrator password")}</h2><p class="muted">${tr("Set a new password for your administrator account. All sessions will be signed out.")}</p></div><button class="btn" data-action="change-password">${icon("key-round")}${tr("Reset password")}</button></section><div class="row version-actions"><a class="btn" href="/api/v1/openapi.json" download="bunmail-openapi.json">${icon("download")}${tr("Download OpenAPI")}</a></div>`+versionPanel();
     }
     if(request!==sequence)return;
     if(!background||html!==renderedHTML){$("#content").innerHTML=html;renderedHTML=html;document.querySelectorAll(".recipient-column").forEach(el=>el.dataset.label=t("To"));icons();}
@@ -284,7 +284,20 @@ async function pollTest(id){
 }
 function detail(label,value) {return `<dt>${tr(label)}</dt><dd>${esc(value)}</dd>`;}
 function field(name,label,type="text",required=false,value="") {return `<div class="field"><label for="${name}">${tr(label)}${required?`<span class="required-mark" aria-label="${tr("Required")}">*</span>`:""}</label><input id="${name}" name="${name}" type="${type}" ${required?"required":""} value="${esc(value)}" maxlength="${name==="subject"?998:254}"></div>`;}
-function passwordField(name,label,autocomplete,mark=true) {return `<div class="field"><label for="${name}">${tr(label)}${mark?`<span class="required-mark" aria-label="${tr("Required")}">*</span>`:""}</label><div class="password-field"><input id="${name}" name="${name}" type="password" autocomplete="${autocomplete}" required maxlength="256"><button type="button" class="btn icon" data-action="toggle-password" aria-pressed="false" aria-label="${tr("Show password")}" title="${tr("Show password")}">${icon("eye")}</button></div></div>`;}
+function passwordField(name,label,autocomplete,mark=true) {const creating=autocomplete==="new-password";return `<div class="field"><label for="${name}">${tr(label)}${mark?`<span class="required-mark" aria-label="${tr("Required")}">*</span>`:""}</label><div class="password-field">${icon("lock-keyhole")}<input id="${name}" name="${name}" type="password" autocomplete="${autocomplete}" required maxlength="256" spellcheck="false" autocapitalize="off" ${creating?'aria-describedby="password-guidance"':''}><button type="button" class="password-toggle" data-action="toggle-password" aria-controls="${name}" aria-pressed="false" aria-label="${tr("Show password")}" title="${tr("Show password")}">${icon("eye")}<span>${tr("Show")}</span></button></div><small class="caps-warning" role="status" hidden>${tr("Caps Lock is on")}</small></div>`;}
+function passwordDialog(){
+  modal("Reset administrator password",`<form id="password-form" class="form"><p class="muted">${tr("Verify your current password to keep your account secure.")}</p>${passwordField("current_password","Current password","current-password")}${passwordField("new_password","New password","new-password")}${passwordField("confirm_password","Confirm new password","new-password")}<div id="password-guidance" class="password-guidance"><span data-password-rule="length">${icon("circle")}${tr("15 to 256 bytes")}</span><span data-password-rule="different">${icon("circle")}${tr("Different from current password")}</span><span data-password-rule="match">${icon("circle")}${tr("New passwords match")}</span></div><p class="notice">${icon("log-out")}${tr("You will sign in again with your new password on every device.")}</p><div class="form-foot"><button type="button" class="btn" data-action="close">${tr("Cancel")}</button><button type="submit" class="btn primary">${icon("check")}${tr("Save new password")}</button></div></form>`);
+}
+function passwordRules(){
+  const form=$("#password-form");if(!form)return;
+  const current=form.elements.current_password.value,next=form.elements.new_password.value,confirmation=form.elements.confirm_password;
+  const size=new TextEncoder().encode(next).length;
+  const rules={length:size>=15&&size<=256,different:!!next&&next!==current,match:!!next&&next===confirmation.value};
+  form.elements.new_password.setCustomValidity(next&&!rules.length?t("Password must have 15 to 256 bytes"):next&&!rules.different?t("New password must differ from current password"):"");
+  confirmation.setCustomValidity(confirmation.value&&!rules.match?t("New passwords do not match"):"");
+  for(const [rule,valid]of Object.entries(rules)){const row=$(`[data-password-rule="${rule}"]`,form);row.classList.toggle("complete",valid);row.innerHTML=icon(valid?"circle-check":"circle")+esc(t({length:"15 to 256 bytes",different:"Different from current password",match:"New passwords match"}[rule]));}
+  icons();
+}
 function area(name,label,rows=6,value="") {return `<div class="field"><label for="${name}">${tr(label)}</label><textarea id="${name}" name="${name}" rows="${rows}" ${name==="html"?'class="mono"':""}>${esc(value)}</textarea></div>`;}
 function modal(title,html,wide=false) {
   clearTimeout(testTimer);dialogDirty=false;const d=$("#dialog");if(d.open)d.close();d.dataset.emailId="";d.dataset.cloudflareId="";d.classList.toggle("wide",wide);d.setAttribute("aria-labelledby","dialog-title");d.innerHTML=`<div class="dialog-head"><h2 id="dialog-title">${tr(title)}</h2>${button("close","x","Close")}</div>${html}`;d.showModal();icons();$("input,textarea",d)?.focus();
@@ -308,6 +321,15 @@ document.addEventListener("submit",async event=>{
   try {
     if(form.id==="email-search-form"){emailSearch=values.search.trim();page=0;await render();return;}
     if(form.id==="login-form") {await enterSession(await api("/login",{method:"POST",body:JSON.stringify(values)}));return;}
+    if(form.id==="password-form") {
+      const size=new TextEncoder().encode(values.new_password).length;
+      if(size<15||size>256)throw new Error("Password must have 15 to 256 bytes");
+      if(values.new_password!==values.confirm_password)throw new Error("New passwords do not match");
+      if(values.current_password===values.new_password)throw new Error("New password must differ from current password");
+      await api("/admin/password",{method:"PUT",body:JSON.stringify({current_password:values.current_password,new_password:values.new_password})});
+      form.reset();dialogDirty=false;$("#dialog").close();sequence++;user=null;dirty=false;composeDraft=null;
+      renderLogin();toast("Password updated. Sign in with your new password.");return;
+    }
     if(form.id==="domain-form") {await api("/domains",{method:"POST",body:JSON.stringify(values)});$("#dialog").close();toast("Saved");await render();}
     if(form.id==="key-form") {const key=await api("/api-keys",{method:"POST",body:JSON.stringify(values)});await render();modal("Key created",`<p class="muted">${tr("This key is shown only once.")}</p><pre class="reveal" id="new-key">${esc(key.token)}</pre><div class="form-foot"><button class="btn primary" data-action="copy-key">${icon("copy")}${tr("Copy")}</button></div>`);}
     if(form.id==="template-form") {const {preview_variables,...input}=values;await api(`/templates${form.dataset.id?`/${form.dataset.id}`:""}`,{method:form.dataset.id?"PUT":"POST",body:JSON.stringify(input)});dialogDirty=false;$("#dialog").close();toast("Saved");await render();}
@@ -331,13 +353,15 @@ document.addEventListener("click",async event=>{
   const reveal=event.target.closest("[data-action='toggle-password']");
   if(reveal){
     const input=reveal.parentElement.querySelector("input");
+    const start=input.selectionStart,end=input.selectionEnd;
     const shown=input.type==="password";
     input.type=shown?"text":"password";
+    if(start!==null)input.setSelectionRange(start,end);
     const label=shown?"Hide password":"Show password";
     reveal.setAttribute("aria-pressed",String(shown));
     reveal.setAttribute("aria-label",t(label));
     reveal.title=t(label);
-    reveal.innerHTML=icon(shown?"eye-off":"eye");
+    reveal.innerHTML=icon(shown?"eye-off":"eye")+`<span>${tr(shown?"Hide":"Show")}</span>`;
     icons();
     return;
   }
@@ -432,6 +456,7 @@ document.addEventListener("click",async event=>{
       case "next":page++;await render();break;
       case "email":await emailDetails(id);break;
       case "retry":await api(`/emails/${id}/retry`,{method:"POST"});$("#dialog").close();toast("Retry scheduled");await render();break;
+      case "change-password":passwordDialog();break;
       case "cancel-email":if(confirm(t("Cancel queued email?"))){await api(`/emails/${id}/cancel`,{method:"POST"});$("#dialog").close();await render();}break;
     }
   }catch(error){if(action.dataset.action==="verify" && error.retryAfter>0)setVerifyCooldown(id,error.retryAfter);const form=action.closest("form");if(form)formError(form,error instanceof SyntaxError?"Invalid JSON":error.message);else toast(error.message);}finally{if(action.dataset.action==="verify")verifyPending.delete(id);action.disabled=false;updateVerifyButtons();cloudflareButtons();}
@@ -446,9 +471,9 @@ document.addEventListener("change",event=>{
   if(event.target.id==="template_id"){dirty=true;$(".draft-status").hidden=false;syncTemplate();}
   if(event.target.id==="template-language"){templateLanguage=event.target.value;$("#template-list").innerHTML=templateCards();icons();}
 });
-document.addEventListener("input",event=>{if(event.target.closest("#send-form")){dirty=true;$(".draft-status").hidden=false;}if(event.target.closest("#template-form"))dialogDirty=true;if(event.target.id==="template-search"){templateSearch=event.target.value;$("#template-list").innerHTML=templateCards();icons();}});
+document.addEventListener("input",event=>{if(event.target.closest("#send-form")){dirty=true;$(".draft-status").hidden=false;}if(event.target.closest("#template-form, #password-form"))dialogDirty=true;if(event.target.closest("#password-form"))passwordRules();if(event.target.id==="template-search"){templateSearch=event.target.value;$("#template-list").innerHTML=templateCards();icons();}});
 document.addEventListener("input",event=>{if(["install-directory","package-directory"].includes(event.target.id))updateCommands();});
-$("#dialog").addEventListener("close",()=>{clearTimeout(testTimer);dialogDirty=false;});
+$("#dialog").addEventListener("close",()=>{clearTimeout(testTimer);dialogDirty=false;$("#password-form")?.reset();window.bunmailGlass?.refresh();});
 $("#dialog").addEventListener("cancel",event=>{event.preventDefault();closeDialog();});
 window.addEventListener("beforeunload",event=>{if(hasUnsavedChanges()){event.preventDefault();event.returnValue="";}});
 window.addEventListener("hashchange",()=>{
@@ -460,3 +485,9 @@ setInterval(updateVerifyButtons,1000);
 setInterval(updateCheckButton,1000);
 setInterval(pollUpdateStatus,3000);
 (async()=>{try{user=await api("/me");await enterSession(user);}catch(error){renderLogin(error.status===401?"":error.message);}})();
+
+// Keep the insertion point when using the visibility control with a pointer. Keyboard focus
+// remains on the button, which exposes its pressed state and associated input to assistive tools.
+document.addEventListener("pointerdown",event=>{if(event.target.closest('[data-action="toggle-password"]'))event.preventDefault();});
+for(const type of ["keydown","keyup"])document.addEventListener(type,event=>{if(!event.target.matches(".password-field input"))return;const warning=event.target.closest(".field").querySelector(".caps-warning");warning.hidden=!event.getModifierState?.("CapsLock");});
+document.addEventListener("focusout",event=>{if(event.target.matches(".password-field input"))event.target.closest(".field").querySelector(".caps-warning").hidden=true;});

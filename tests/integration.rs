@@ -825,6 +825,12 @@ async fn authenticated_api_queue_and_dkim() {
         let _ = server.await;
         assert!(status.success());
     }
+    // The browser password flow deliberately revokes every session, including this fixture's.
+    let cookie = if std::env::var("BUNMAIL_BROWSER_TEST").as_deref() == Ok("true") {
+        password_login(&app, "correct-horse-battery-staple-123").await
+    } else {
+        cookie
+    };
     public_api::verify(&state, &cookie, &bearer).await;
     if std::env::var("BUNMAIL_THIRD_PARTY_TEST").as_deref() == Ok("true") {
         public_api::browser(&state, &bearer).await;
@@ -863,6 +869,7 @@ async fn authenticated_api_queue_and_dkim() {
             .0,
         StatusCode::UNAUTHORIZED
     );
+    verify_password_change(&app, &state).await;
     drop(app);
     drop(state);
     db.close().await;
@@ -1638,4 +1645,222 @@ async fn verify_single_admin(app: &axum::Router, state: &AppState, cookie: &str)
         .0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+async fn password_login(app: &axum::Router, password: &str) -> String {
+    let (status, headers, _) = request(
+        app,
+        "POST",
+        "/api/v1/login",
+        json!({"email":"owner@example.test","password":password}),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+async fn verify_password_change(app: &axum::Router, state: &AppState) {
+    state.limits.lock().unwrap().clear();
+    let original = "correct-horse-battery-staple-123";
+    let next = "a-new-administrator-password-456";
+    let first = password_login(app, original).await;
+    let second = password_login(app, original).await;
+    let input = json!({"current_password":original,"new_password":next});
+    let (_, _, key) = request(
+        app,
+        "POST",
+        "/api/v1/api-keys",
+        json!({"name":"password permissions"}),
+        Some(&first),
+        true,
+    )
+    .await;
+    let bearer = format!("Bearer {}", key["token"].as_str().unwrap());
+    let before: String =
+        sqlx::query_scalar("SELECT password_hash FROM accounts WHERE role='admin'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    for (auth, origin, body, expected) in [
+        (None, true, input.clone(), StatusCode::UNAUTHORIZED),
+        (
+            Some(bearer.as_str()),
+            true,
+            input.clone(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some(first.as_str()),
+            false,
+            input.clone(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some(first.as_str()),
+            true,
+            json!({"current_password":original,"new_password":"short"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Some(first.as_str()),
+            true,
+            json!({"current_password":original,"new_password":"a".repeat(257)}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Some(first.as_str()),
+            true,
+            json!({"current_password":original,"new_password":original}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Some(first.as_str()),
+            true,
+            json!({"current_password":"wrong-password","new_password":next}),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        assert_eq!(
+            request(app, "PUT", "/api/v1/admin/password", body, auth, origin)
+                .await
+                .0,
+            expected
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT password_hash FROM accounts WHERE role='admin'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        before
+    );
+    let (status, headers, _) = request(
+        app,
+        "PUT",
+        "/api/v1/admin/password",
+        input,
+        Some(&first),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    for cookie in [&first, &second] {
+        assert_eq!(
+            request(app, "GET", "/api/v1/me", json!({}), Some(cookie), false)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        request(
+            app,
+            "POST",
+            "/api/v1/login",
+            json!({"email":"owner@example.test","password":original}),
+            None,
+            true
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let current = password_login(app, next).await;
+    let (account, owner): (String, String) =
+        sqlx::query_as("SELECT a.password_hash,o.password_hash FROM accounts a CROSS JOIN owner o")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_ne!(account, before);
+    assert_ne!(account, next);
+    assert_eq!(account, owner);
+    assert_eq!(
+        request(
+            app,
+            "GET",
+            "/api/v1/auth/check",
+            json!({}),
+            Some(&bearer),
+            false
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    state.limits.lock().unwrap().clear();
+    for attempt in 0..11 {
+        assert_eq!(
+            request(
+                app,
+                "PUT",
+                "/api/v1/admin/password",
+                json!({"current_password":"wrong-password","new_password":original}),
+                Some(&current),
+                true
+            )
+            .await
+            .0,
+            if attempt < 10 {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    state.limits.lock().unwrap().clear();
+    let candidate_a = "concurrent-new-password-one";
+    let candidate_b = "concurrent-new-password-two";
+    let (a, b) = tokio::join!(
+        request(
+            app,
+            "PUT",
+            "/api/v1/admin/password",
+            json!({"current_password":next,"new_password":candidate_a}),
+            Some(&current),
+            true
+        ),
+        request(
+            app,
+            "PUT",
+            "/api/v1/admin/password",
+            json!({"current_password":next,"new_password":candidate_b}),
+            Some(&current),
+            true
+        )
+    );
+    assert_eq!(
+        [a.0, b.0]
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert!([a.0, b.0].iter().all(|status| {
+        [
+            StatusCode::OK,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+        ]
+        .contains(status)
+    }));
+    let winner = if a.0 == StatusCode::OK {
+        candidate_a
+    } else {
+        candidate_b
+    };
+    let _ = password_login(app, winner).await;
 }
