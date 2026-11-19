@@ -56,6 +56,12 @@ async fn logo() -> impl IntoResponse {
         include_str!("../../static/logo.svg"),
     )
 }
+async fn favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../../static/favicon.svg"),
+    )
+}
 async fn security(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -100,6 +106,7 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/lucide.js", get(lucide))
         .route("/assets/liquid-glass.js", get(liquid_glass))
         .route("/assets/logo.svg", get(logo))
+        .route("/assets/favicon.svg", get(favicon))
         .route("/health", get(api::health))
         .route("/api/v1/login", post(auth::login))
         .route("/api/v1/logout", post(auth::logout))

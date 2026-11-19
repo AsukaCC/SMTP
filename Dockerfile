@@ -13,6 +13,7 @@ COPY migrations ./migrations
 COPY emails ./emails
 COPY static ./static
 COPY --from=frontend /static/vendor/liquid-glass.js ./static/vendor/liquid-glass.js
+ARG BUNMAIL_BUILD_REPOSITORY=AsukaCC/SMTP
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

@@ -3,6 +3,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import socket
@@ -17,7 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
 import updater
-from deploy import FILES, write_json
+from deploy import FILES, build_repository, write_json
 
 
 class FakeDeployment:
@@ -79,6 +80,33 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.agent.job['status'], 'succeeded')
         self.assertEqual(updater.Updater(self.root, self.deployment).status()['current_version'], '0.1.1')
         self.assertFalse(list(self.deployment.meta.glob('update-*/*/image.tar.gz')))
+
+    def test_build_source_from_origin_and_actions(self):
+        (self.root / '.git').mkdir()
+        with patch.dict(os.environ, {}, clear=True), patch('deploy.shutil.which', return_value='git'), patch('deploy.subprocess.run') as git:
+            for origin in ('https://github.com/team/fork.git', 'git@github.com:team/fork.git', 'ssh://git@github.com/team/fork'):
+                git.return_value.stdout = origin
+                self.assertEqual(build_repository(self.root), 'team/fork')
+            git.return_value.stdout = 'https://github.com.example.org/team/fork.git'
+            self.assertEqual(build_repository(self.root), 'AsukaCC/SMTP')
+            os.environ['GITHUB_REPOSITORY'] = 'publisher/other'
+            self.assertEqual(build_repository(self.root), 'publisher/other')
+            os.environ['GITHUB_REPOSITORY'] = '../other'
+            with self.assertRaises(ValueError):
+                build_repository(self.root)
+
+    def test_installed_source_follows_current_release_and_respects_override(self):
+        (self.root / '.env').write_text('')
+        self.assertEqual(self.agent.status()['repository'], 'AsukaCC/SMTP')
+        self.deployment.data['current']['repository'] = 'team/fork'
+        self.assertEqual(self.agent.status()['repository'], 'team/fork')
+        with self.assertRaisesRegex(updater.UpdateError, 'repository_mismatch'):
+            self.agent.submit(self.request)
+        (self.root / '.env').write_text('UPDATE_REPOSITORY=custom/mail\n')
+        self.assertEqual(self.agent.status()['repository'], 'custom/mail')
+        (self.root / '.env').write_text('UPDATE_REPOSITORY=\n')
+        with self.assertRaisesRegex(updater.UpdateError, 'repository_disabled'):
+            self.agent.submit(self.request)
 
     def test_schema_change_never_reaches_deployment(self):
         self.run_install(*self.package(schema='c' * 64))

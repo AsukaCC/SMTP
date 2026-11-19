@@ -6,6 +6,7 @@ import hashlib
 import os
 from pathlib import Path
 import secrets
+from deploy import build_repository
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--development', action='store_true')
@@ -33,6 +34,9 @@ environment = {
     'SMTP_TLS_CERT': '',
     'SMTP_TLS_KEY': '',
 }
+source = Path(__file__).resolve().parent.parent
+if (source / 'scripts' / 'setup.py').resolve() == Path(__file__).resolve() and (source / 'Cargo.toml').is_file():
+    environment['BUNMAIL_BUILD_REPOSITORY'] = build_repository(source)
 try:
     descriptor = os.open(root / '.env', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
 except FileExistsError:

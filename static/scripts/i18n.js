@@ -1,5 +1,7 @@
 "use strict";
 const ZH = {
+  "Administrator sign-in": "管理员登录",
+  "Administration": "系统管理",
   "BUNMAIL / PERSONAL MAIL SERVER": "BUNMAIL / 个人邮件服务器",
   "Your mail. Your space.": "你的邮件，你的空间。",
   "Your mail.": "你的邮件，",
@@ -320,7 +322,7 @@ const ZH = {
   "Insufficient disk space": "磁盘空间不足",
   "Update interrupted; check deployment status": "更新中断，请检查部署状态",
   "Update failed; check deployment status": "更新失败，请检查部署状态",
-  "Update service not configured": "更新服务未配置",
+  "One-click installation is not enabled": "一键安装服务未启用",
   "Update service offline": "更新服务未连接",
   "Deployment needs attention": "部署存在未完成操作",
   "Update repository mismatch": "更新仓库配置不一致",

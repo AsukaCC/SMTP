@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from deploy import Deployment, FILES, read_package, version, write_json
+from deploy import Deployment, FILES, OFFICIAL_REPOSITORY, read_package, valid_repository, version, write_json
 
 ACTIVE = {'queued', 'downloading', 'validating', 'backing_up', 'installing', 'rolling_back'}
 MAX_ARCHIVE = 2 * 1024**3
@@ -35,11 +35,13 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def repository(root):
+def repository(root, current):
     values = dict(line.split('=', 1) for line in (root / '.env').read_text().splitlines()
                   if line and not line.startswith('#') and '=' in line)
-    repo = values.get('UPDATE_REPOSITORY', 'AsukaCC/SMTP')
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or any(p in ('.', '..') for p in repo.split('/')):
+    repo = values.get('UPDATE_REPOSITORY', current.get('repository', OFFICIAL_REPOSITORY))
+    if repo == '':
+        return None
+    if not valid_repository(repo):
         raise UpdateError('repository_disabled')
     return repo
 
@@ -126,7 +128,6 @@ class Updater:
     def __init__(self, root, deployment=None):
         self.root = root.resolve()
         self.deployment = deployment or Deployment(self.root, progress=self.progress)
-        self.repo = repository(self.root)
         self.path = self.deployment.meta / 'update-job.json'
         self.mutex = threading.RLock()
         self.job = json.loads(self.path.read_text()) if self.path.exists() else None
@@ -135,12 +136,16 @@ class Updater:
             complete = not state.get('pending') and (state.get('current') or {}).get('version') == self.job['version']
             self.progress('succeeded' if complete else 'interrupted', None if complete else 'update_interrupted')
 
+    @property
+    def repo(self):
+        return repository(self.root, (self.deployment.state() or {}).get('current') or {})
+
     def status(self):
         with self.mutex:
             state = self.deployment.state() or {}
             current = state.get('current') or {}
             return {'status': 'ready' if current and not state.get('pending') else 'blocked',
-                    'repository': self.repo, 'platform': current.get('platform'),
+                    'repository': repository(self.root, current), 'platform': current.get('platform'),
                     'current_version': current.get('version'), 'job': self.job}
 
     def progress(self, status, error=None):
@@ -154,22 +159,25 @@ class Updater:
         number = request['version']
         version(number)
         uuid.UUID(request['request_id'])
-        if request['repository'] != self.repo:
-            raise UpdateError('repository_mismatch')
         with self.mutex:
+            state = self.deployment.state() or {}
+            current = state.get('current')
+            repo = repository(self.root, current or {})
+            if repo is None:
+                raise UpdateError('repository_disabled')
+            if request['repository'] != repo:
+                raise UpdateError('repository_mismatch')
             if self.job and self.job['request_id'] == request['request_id']:
                 if self.job['version'] != number:
                     raise UpdateError('invalid_request')
                 return self.job.copy()
             if self.job and self.job['status'] in ACTIVE:
                 raise UpdateError('update_busy')
-            state = self.deployment.state() or {}
-            current = state.get('current')
             if not current or state.get('pending'):
                 raise UpdateError('deployment_blocked')
             if version(number) <= version(current['version']):
                 raise UpdateError('version_not_newer')
-            self.job = {'request_id': request['request_id'], 'version': number,
+            self.job = {'request_id': request['request_id'], 'version': number, 'repository': request['repository'],
                         'status': 'queued', 'error': None, 'updated_at': now()}
             write_json(self.path, self.job)
             threading.Thread(target=self.install, args=(number, current.copy()), daemon=False).start()
@@ -178,7 +186,8 @@ class Updater:
     def install(self, number, original):
         try:
             self.progress('downloading')
-            asset = select_asset(fetch_release(self.repo), self.repo, number, original['platform'])
+            repo = self.job['repository']
+            asset = select_asset(fetch_release(repo), repo, number, original['platform'])
             if shutil.disk_usage(self.deployment.meta).free < asset['size'] * 3 + 512 * 1024**2:
                 raise UpdateError('insufficient_space')
             with tempfile.TemporaryDirectory(prefix='update-', dir=self.deployment.meta) as temporary:

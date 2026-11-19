@@ -17,6 +17,23 @@ import tarfile
 import tomllib
 
 FILES = ('compose.yml', 'compose.smtp.yml', 'deploy.py', 'updater.py', 'setup.py', '.env.example', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
+OFFICIAL_REPOSITORY = 'AsukaCC/SMTP'
+
+def valid_repository(value):
+    return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}', value) and all(p not in ('.', '..') for p in value.split('/'))
+
+def build_repository(root):
+    if 'GITHUB_REPOSITORY' in os.environ:
+        repo = os.environ['GITHUB_REPOSITORY']
+    elif (root / '.git').exists() and shutil.which('git'):
+        remote = subprocess.run(['git', '-C', str(root), 'remote', 'get-url', 'origin'], capture_output=True, text=True)
+        match = re.fullmatch(r'(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([^/]+/[^/]+?)(?:\.git)?/?', remote.stdout.strip())
+        repo = match[1] if match else OFFICIAL_REPOSITORY
+    else:
+        repo = OFFICIAL_REPOSITORY
+    if not valid_repository(repo):
+        raise ValueError('无效的 GitHub 发布仓库')
+    return repo
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
@@ -55,7 +72,8 @@ def package(number, output):
         schema_hash.update(path.name.encode())
         schema_hash.update(path.read_bytes())
     schema = schema_hash.hexdigest()
-    run('docker', 'build', '--label', f'io.bunmail.schema={schema}', '--label', f'org.opencontainers.image.version={number}', '-t', image, str(root))
+    repo = build_repository(root)
+    run('docker', 'build', '--build-arg', f'BUNMAIL_BUILD_REPOSITORY={repo}', '--label', f'org.opencontainers.image.source=https://github.com/{repo}', '--label', f'io.bunmail.schema={schema}', '--label', f'org.opencontainers.image.version={number}', '-t', image, str(root))
     info = json.loads(run('docker', 'image', 'inspect', image, capture_output=True, text=True).stdout)[0]
     with tempfile.TemporaryDirectory(prefix='.package-', dir=output) as temporary:
         directory = Path(temporary)
@@ -71,7 +89,7 @@ def package(number, output):
                 code = process.wait()
             if code:
                 raise ValueError('镜像导出失败')
-        manifest = {'format': 1, 'version': number, 'schema': schema, 'image': info['Id'], 'platform': f"{info['Os']}/{info['Architecture']}", 'files': {name: digest(directory / name) for name in (*FILES, 'image.tar.gz')}}
+        manifest = {'format': 1, 'repository': repo, 'version': number, 'schema': schema, 'image': info['Id'], 'platform': f"{info['Os']}/{info['Architecture']}", 'files': {name: digest(directory / name) for name in (*FILES, 'image.tar.gz')}}
         write_json(directory / 'release.json', manifest)
         os.rename(directory, destination)
     archive = output / f"bunmail-rs-{number}-{info['Os']}-{info['Architecture']}.tar.gz"
@@ -84,6 +102,8 @@ def package(number, output):
 def read_package(directory):
     data = json.loads((directory / 'release.json').read_text())
     version(data['version'])
+    if 'repository' in data and not valid_repository(data['repository']):
+        raise ValueError('无效的 GitHub 发布仓库')
     if data['format'] != 1 or not re.fullmatch(r'sha256:[a-f0-9]{64}', data['image']) or not re.fullmatch(r'[a-f0-9]{64}', data['schema']):
         raise ValueError('无效的发布清单')
     if set(data['files']) != set((*FILES, 'image.tar.gz')):
@@ -140,6 +160,8 @@ class Deployment:
         if f"{info['Os']}/{info['Architecture']}" != release['platform']:
             raise ValueError('镜像与构建包平台不匹配')
         labels = info['Config'].get('Labels') or {}
+        if 'repository' in release and labels.get('org.opencontainers.image.source') != 'https://github.com/' + release['repository']:
+            raise ValueError('镜像与构建包的发布仓库不匹配')
         if labels.get('io.bunmail.schema') != release['schema'] or labels.get('org.opencontainers.image.version') != release['version']:
             raise ValueError('镜像版本或数据库指纹不匹配')
         releases = self.meta / 'releases'

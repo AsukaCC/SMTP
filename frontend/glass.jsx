@@ -5,7 +5,7 @@ import LiquidGlass from "liquid-glass-react";
 // React owns only the decorative material layer. Forms, focus, and application data stay
 // in the existing dashboard DOM, above the refraction layer, so text never distorts.
 const surfaces = new Map();
-const selector = ".sidebar, .topbar, .login-inner, .login-emblem, .stat, .readiness, .template-card, .settings-grid > section, .version-section, .security-section, dialog[open]";
+const selector = ".sidebar, .topbar, .login-inner, dialog[open]";
 const contrast = matchMedia("(prefers-contrast: more)");
 const transparency = matchMedia("(prefers-reduced-transparency: reduce)");
 const motion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -20,16 +20,16 @@ function draw(host, entry) {
     entry.root.render(null);
     return;
   }
-  const radius = parseFloat(getComputedStyle(host).borderRadius) || 24;
+  const radius = parseFloat(getComputedStyle(host).borderTopLeftRadius) || 0;
   entry.root.render(
     <LiquidGlass
       key={`${Math.round(width)}:${Math.round(height)}`}
       className="liquid-material-frame"
       mode="standard"
-      displacementScale={28}
+      displacementScale={14}
       blurAmount={0.18}
       saturation={125}
-      aberrationIntensity={0.65}
+      aberrationIntensity={0.2}
       elasticity={0}
       globalMousePos={fixedMouse}
       mouseOffset={fixedMouse}

@@ -115,7 +115,13 @@ impl Config {
                 development,
             )?,
             update_repository: crate::updates::repository(
-                &env::var("UPDATE_REPOSITORY").unwrap_or_else(|_| "AsukaCC/SMTP".into()),
+                &env::var("UPDATE_REPOSITORY").unwrap_or_else(|_| {
+                    option_env!("BUNMAIL_BUILD_REPOSITORY")
+                        .or(option_env!("GITHUB_REPOSITORY"))
+                        .map(str::to_owned)
+                        .or_else(|| env::var("BUNMAIL_BUILD_REPOSITORY").ok())
+                        .unwrap_or_else(|| "AsukaCC/SMTP".into())
+                }),
             )?,
             update_socket: env::var("UPDATE_SOCKET")
                 .ok()

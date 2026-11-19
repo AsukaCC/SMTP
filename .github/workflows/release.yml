@@ -65,6 +65,7 @@ jobs:
               with tarfile.open(path) as archive:
                   manifest = json.load(archive.extractfile('release.json'))
               assert manifest['version'] == version
+              assert manifest['repository'] == os.environ['GITHUB_REPOSITORY']
               assert manifest['platform'] == f'linux/{architecture}'
               schemas.add(manifest['schema'])
               with path.open('rb') as stream:
